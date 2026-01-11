@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate, useLocation } from "react-router-dom";
-import { FaBars, FaComments, FaPaperPlane, FaChevronLeft, FaChevronRight } from "react-icons/fa";
+import { FaBars, FaComments, FaPaperPlane, FaChevronLeft, FaChevronRight, FaCheckCircle, FaHeart } from "react-icons/fa";
 import { supabase } from "../supabase-client";
 import { useAuth } from "../context/AuthContext";
 import toast from "react-hot-toast";
@@ -1762,50 +1762,24 @@ const ChatPage: React.FC = () => {
 
   // Owner-only 'Mark as Adopted' button
   const [chatPostStatus, setChatPostStatus] = React.useState("");
+  const [isPostOwner, setIsPostOwner] = React.useState(false);
+
   React.useEffect(() => {
     const convo = conversations.find(c => c.conversation_id === conversationId);
-    if (convo && convo.post_id) {
+    if (convo && convo.post_id && user) {
+      // Fetch post details to check owner and status
       supabase.from('posts').select('status,user_id').eq('id', convo.post_id).single()
         .then(({data}) => {
-          if (data) setChatPostStatus(data.status || "");
+          if (data) {
+            setChatPostStatus(data.status || "");
+            setIsPostOwner(data.user_id === user.id);
+          }
         });
+    } else {
+      setChatPostStatus("");
+      setIsPostOwner(false);
     }
-  }, [conversationId, conversations]);
-
-  const isOwner = (() => {
-    const convo = conversations.find(c => c.conversation_id === conversationId);
-    if (!convo || !convo.post_id || !user) return false;
-    const [found] = conversations.filter(c => c.conversation_id === conversationId);
-    // If you already pull owner_id, use that; else fetch from post data like above
-    return found && found.post_id && user && chatPostStatus && user.id && found.post_id
-      ? found.owner_id
-        ? found.owner_id === user.id
-        : false // If not available on conversation, you can extend to fetch and compare
-      : false;
-  })();
-
-  // Add Owner Mark As Adopted Button as part of chat main area (insert wherever fits, e.g., just above message list)
-  const MarkAsAdoptedButton = conversationId && isOwner && chatPostStatus.toLowerCase() !== "adopted" ? (
-    <button
-      className="ml-2 px-4 py-2 rounded bg-green-500 text-white font-semibold shadow"
-      onClick={async () => {
-        const convo = conversations.find(c => c.conversation_id === conversationId);
-        if (!convo || !convo.post_id) return;
-        const { error } = await supabase
-          .from("posts")
-          .update({ status: "Adopted" })
-          .eq("id", convo.post_id);
-        if (!error) {
-          setChatPostStatus("Adopted");
-          toast.success("Pet marked as Adopted!");
-        } else {
-          toast.error("Failed to mark as Adopted");
-        }
-      }}
-    >
-      Mark as Adopted
-    </button>
-  ) : null;
+  }, [conversationId, conversations, user]);
 
 // Render the chat interface or conversation list
   if (!user) {
@@ -2007,6 +1981,47 @@ const ChatPage: React.FC = () => {
           </div>
           {conversationId && (
             <div className="flex gap-2">
+              {/* Mark as Adopted button - only show to post owner for non-adopted pets */}
+              {isPostOwner && chatPostStatus && chatPostStatus.toLowerCase() !== "adopted" && (
+                <button
+                  onClick={async () => {
+                    const convo = conversations.find(c => c.conversation_id === conversationId);
+                    if (!convo || !convo.post_id) return;
+                    
+                    // Mark post as Adopted
+                    const { error } = await supabase
+                      .from("posts")
+                      .update({ status: "Adopted" })
+                      .eq("id", convo.post_id);
+
+                    // Mark the approved adoption request as 'completed'
+                    const { data: approvedRequests } = await supabase
+                      .from("adoption_requests")
+                      .select("id")
+                      .eq("post_id", convo.post_id)
+                      .eq("status", "approved");
+
+                    if (approvedRequests && approvedRequests.length > 0) {
+                      const reqId = approvedRequests[0].id;
+                      await supabase
+                        .from("adoption_requests")
+                        .update({ status: "completed", updated_at: new Date().toISOString() })
+                        .eq("id", reqId);
+                    }
+                    
+                    if (!error) {
+                      setChatPostStatus("Adopted");
+                      toast.success("Pet marked as Adopted!");
+                    } else {
+                      toast.error("Failed to mark as Adopted");
+                    }
+                  }}
+                  className="flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-green-500 via-emerald-500 to-teal-500 text-white rounded-xl hover:from-green-600 hover:via-emerald-600 hover:to-teal-600 text-base font-bold shadow-lg hover:shadow-xl transition-all transform hover:scale-105 border-2 border-white/20"
+                >
+                  <FaCheckCircle className="text-xl" />
+                  <span>Mark as Adopted</span>
+                </button>
+              )}
               <button
                 onClick={() => setShowDeleteDialog(conversationId)}
                 className="px-3 py-1 bg-red-100 text-red-700 rounded hover:bg-red-200 text-xs font-semibold"
@@ -2095,9 +2110,63 @@ const ChatPage: React.FC = () => {
         {/* Bottom Action Bar */}
         <div className="p-4 border-t border-slate-200/80 bg-white/80 backdrop-blur-lg">
           {conversationId ? (
-            // Message Input Form
+            <>
+              {/* Prominent Mark as Adopted Banner - only show to post owner for non-adopted pets */}
+              {isPostOwner && chatPostStatus && chatPostStatus.toLowerCase() !== "adopted" && (
+                <div className="mb-4 p-4 bg-gradient-to-r from-green-50 via-emerald-50 to-teal-50 border-2 border-green-300 rounded-xl shadow-lg">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className="w-12 h-12 bg-gradient-to-r from-green-500 to-emerald-500 rounded-full flex items-center justify-center shadow-md">
+                        <FaHeart className="text-white text-xl" />
+                      </div>
+                      <div>
+                        <p className="font-bold text-green-800 text-lg">Ready to Finalize Adoption?</p>
+                        <p className="text-sm text-green-700">Click the button below to mark this pet as adopted</p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={async () => {
+                        const convo = conversations.find(c => c.conversation_id === conversationId);
+                        if (!convo || !convo.post_id) return;
+                        
+                        // Mark post as Adopted
+                        const { error } = await supabase
+                          .from("posts")
+                          .update({ status: "Adopted" })
+                          .eq("id", convo.post_id);
 
-            <form onSubmit={sendMessage} className="flex items-center gap-3">
+                        // Mark the approved adoption request as 'completed'
+                        const { data: approvedRequests } = await supabase
+                          .from("adoption_requests")
+                          .select("id")
+                          .eq("post_id", convo.post_id)
+                          .eq("status", "approved");
+
+                        if (approvedRequests && approvedRequests.length > 0) {
+                          const reqId = approvedRequests[0].id;
+                          await supabase
+                            .from("adoption_requests")
+                            .update({ status: "completed", updated_at: new Date().toISOString() })
+                            .eq("id", reqId);
+                        }
+                        
+                        if (!error) {
+                          setChatPostStatus("Adopted");
+                          toast.success("Pet marked as Adopted!");
+                        } else {
+                          toast.error("Failed to mark as Adopted");
+                        }
+                      }}
+                      className="flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-green-500 via-emerald-500 to-teal-500 text-white rounded-xl hover:from-green-600 hover:via-emerald-600 hover:to-teal-600 text-base font-bold shadow-lg hover:shadow-xl transition-all transform hover:scale-105 border-2 border-white/30"
+                    >
+                      <FaCheckCircle className="text-xl" />
+                      <span>Mark as Adopted</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+              {/* Message Input Form */}
+              <form onSubmit={sendMessage} className="flex items-center gap-3">
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
@@ -2143,8 +2212,9 @@ const ChatPage: React.FC = () => {
                 className="w-12 h-12 flex items-center justify-center bg-gradient-to-br from-indigo-500 to-purple-500 text-white rounded-full hover:from-indigo-600 hover:to-purple-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-lg"
               >
                 <FaPaperPlane />
-              </button>
-            </form>
+                </button>
+              </form>
+            </>
           ) : (
             // Button to open conversation list
             <button
