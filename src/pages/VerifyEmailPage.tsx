@@ -106,10 +106,7 @@ const VerifyEmailPage = () => {
               if (cached) localStorage.removeItem("pendingAdoptionValidation");
             }
             
-            setResendMessage("Email verified successfully! Redirecting to login...");
-            setTimeout(() => {
-              navigate("/login");
-            }, 2000);
+            setResendMessage("Verification Successful, please wait for the veterinary to check your assessment before you can log in.");
           } else {
             setResendMessage("Verification failed. Please try again or resend the email.");
           }

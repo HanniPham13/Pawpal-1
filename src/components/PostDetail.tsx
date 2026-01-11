@@ -281,6 +281,57 @@ const updatePost = async (postId: number, updates: Partial<Post>) => {
   if (error) throw error;
 };
 
+// Utility function to create adoption chat (shared between PostDetail and AdoptionRequestDetails)
+const createAdoptionChat = async ({
+  adopterId,
+  ownerId,
+  postId,
+  adopterName,
+  petName,
+}: {
+  adopterId: string;
+  ownerId: string;
+  postId: number;
+  adopterName: string;
+  petName?: string;
+}) => {
+  // Check for existing conversation
+  const { data: existing, error: existingError } = await supabase
+    .rpc('find_shared_conversation', {
+      user_id_1: ownerId,
+      user_id_2: adopterId,
+      specific_post_id: postId,
+    });
+  if (!existingError && existing && existing.length > 0) return existing[0].conversation_id;
+  
+  // Create new conversation
+  const { data, error } = await supabase
+    .from("conversations")
+    .insert([
+      {
+        title: adopterName,
+        post_id: postId,
+        adopter_name: adopterName,
+        owner_name: "",
+        pet_name: petName,
+        is_group: false,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+    ])
+    .select()
+    .single();
+  if (error) throw error;
+  const conversationId = data.id;
+  
+  // Add both users to conversation
+  await supabase.from("user_conversations").insert([
+    { user_id: adopterId, conversation_id: conversationId, joined_at: new Date().toISOString() },
+    { user_id: ownerId, conversation_id: conversationId, joined_at: new Date().toISOString() },
+  ]);
+  return conversationId;
+};
+
 // Add adoption request function
 const sendAdoptionRequest = async (
   postId: number,
@@ -344,6 +395,30 @@ const sendAdoptionRequest = async (
       console.error("Error creating notification:", notificationError);
       // Don't throw here, we still want to consider the adoption request as successful
       // Just log the error for debugging
+    }
+
+    // Create chat immediately after submitting adoption request
+    try {
+      // Get requester name for chat
+      const { data: requesterProfile } = await supabase
+        .from("profiles")
+        .select("full_name")
+        .eq("id", requesterId)
+        .single();
+      
+      const requesterName = requesterProfile?.full_name || "User";
+      const conversationId = await createAdoptionChat({
+        adopterId: requesterId,
+        ownerId: ownerId,
+        postId: postId,
+        adopterName: requesterName,
+        petName: petName,
+      });
+      
+      return { ...data, conversationId };
+    } catch (chatError) {
+      console.error("Error creating chat:", chatError);
+      // Don't throw - adoption request was successful, chat creation is optional
     }
 
     return data;
@@ -730,10 +805,30 @@ export const PostDetail = ({ postId }: { postId: string }) => {
           }
           setIsRequesting(true);
           try {
-            await sendAdoptionRequest(post.id, user.id, post.user_id, post.name, reason);
-            toast.success("Adoption request sent successfully!");
+            const result = await sendAdoptionRequest(post.id, user.id, post.user_id, post.name, reason);
+            toast.success("Adoption request sent! Redirecting to chat...");
             setIsAdoptionReasonModalOpen(false);
             checkExistingRequest();
+            
+            // Navigate to chat if conversation was created
+            if (result && (result as any).conversationId) {
+              setTimeout(() => {
+                navigate(`/chat/${(result as any).conversationId}`);
+              }, 1000);
+            } else {
+              // Fallback: try to find existing conversation
+              const { data: existingConv } = await supabase
+                .rpc('find_shared_conversation', {
+                  user_id_1: post.user_id,
+                  user_id_2: user.id,
+                  specific_post_id: post.id,
+                });
+              if (existingConv && existingConv.length > 0) {
+                setTimeout(() => {
+                  navigate(`/chat/${existingConv[0].conversation_id}`);
+                }, 1000);
+              }
+            }
           } catch (error: unknown) {
             const message =
               error instanceof Error ? error.message : "Failed to send adoption request.";

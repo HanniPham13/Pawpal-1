@@ -9,6 +9,7 @@ import {
 } from "react-icons/fa";
 import { toast } from "react-hot-toast";
 import { useAuth } from "../context/AuthContext";
+import { useNavigate } from "react-router-dom";
 
 interface AdoptionRequestDetailsProps {
   requestId: number;
@@ -97,6 +98,7 @@ export const AdoptionRequestDetails: React.FC<AdoptionRequestDetailsProps> = ({
   const [loading, setLoading] = useState(true);
   const [processing, setProcessing] = useState(false);
   const { user } = useAuth();
+  const navigate = useNavigate();
 
   useEffect(() => {
     const fetchRequestDetails = async () => {
@@ -229,27 +231,37 @@ export const AdoptionRequestDetails: React.FC<AdoptionRequestDetailsProps> = ({
 
       if (updateError) throw updateError;
 
-      // Create chat between adopter and owner if approved
+      // If approved, also update post status to 'adopted'
       if (status === "approved") {
-        await createAdoptionChat({
+        // Change pet status to adopted
+        const { error: postError } = await supabase
+          .from("posts")
+          .update({ status: "adopted" })
+          .eq("id", request?.post_id);
+        if (postError) throw postError;
+
+        // Create chat between adopter and owner
+        const conversationId = await createAdoptionChat({
           adopterId: request.requester_id,
           ownerId: request.owner_id,
           postId: request.post_id,
-          adopterName: requester.full_name,
+          adopterName: requester?.full_name || "Unknown",
           petName: request.post?.name,
         });
-        toast.success("Chat created! Continue the adoption process in chat.");
+        toast.success("Adoption approved! Redirecting to chat...");
+        onStatusChange();
+        onClose();
+        // Navigate to chat after a short delay
+        setTimeout(() => {
+          navigate(`/chat/${conversationId}`);
+        }, 500);
+        return; // Exit early to prevent double navigation
       }
 
-      // Create notification for requester
-      const message =
-        status === "approved"
-          ? `Your adoption request for ${
-              request.post?.name || "the pet"
-            } has been approved!`
-          : `Your adoption request for ${
-              request.post?.name || "the pet"
-            } has been rejected.`;
+      // Create notification for requester (status is "rejected" at this point)
+      const message = `Your adoption request for ${
+        request.post?.name || "the pet"
+      } has been rejected.`;
 
       const { error: notificationError } = await supabase
         .from("notifications")
@@ -269,24 +281,16 @@ export const AdoptionRequestDetails: React.FC<AdoptionRequestDetailsProps> = ({
         console.error("Error creating notification:", notificationError);
       }
 
-      toast.success(
-        `Adoption request ${
-          status === "approved" ? "approved" : "rejected"
-        } successfully`
-      );
+      toast.success("Adoption request rejected successfully");
       onStatusChange();
       onClose();
     } catch (error: unknown) {
-      console.error(
-        `Error ${status === "approved" ? "approving" : "rejecting"} request:`,
-        error
-      );
+      const action = status === "approved" ? "approving" : "rejecting";
+      console.error(`Error ${action} request:`, error);
       const errorMessage =
         error instanceof Error
           ? error.message
-          : `Failed to ${
-              status === "approved" ? "approve" : "reject"
-            } request. Please try again.`;
+          : `Failed to ${status === "approved" ? "approve" : "reject"} request. Please try again.`;
       toast.error(errorMessage);
     } finally {
       setProcessing(false);
@@ -360,7 +364,7 @@ export const AdoptionRequestDetails: React.FC<AdoptionRequestDetailsProps> = ({
                   className={`inline-block px-2 py-1 rounded-full text-xs ${
                     request.status === "pending"
                       ? "bg-yellow-100 text-yellow-800"
-                      : request.status === "approved"
+                      : request.status === "approved" || status === "rejected"
                       ? "bg-green-100 text-green-800"
                       : "bg-red-100 text-red-800"
                   }`}
