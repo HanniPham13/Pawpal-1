@@ -3,6 +3,7 @@ import { useNavigate, Link, useLocation } from "react-router-dom";
 import { FaPaw, FaLock, FaEnvelope, FaEye, FaEyeSlash } from "react-icons/fa";
 import { useAuth } from "../context/AuthContext";
 import { LoginErrorModal } from "../components/LoginErrorModal";
+import { supabase } from "../supabase-client";
 
 const LoginPage = () => {
   const navigate = useNavigate();
@@ -17,6 +18,88 @@ const LoginPage = () => {
   const [showErrorModal, setShowErrorModal] = useState(false);
   const [showVerifiedModal, setShowVerifiedModal] = useState(false);
   const [verifiedMessage, setVerifiedMessage] = useState<string | null>(null);
+  const [declineCleanupLoading, setDeclineCleanupLoading] = useState(false);
+  const [declineAction, setDeclineAction] = useState<"got-it" | "register-again" | null>(null);
+
+  const withTimeout = async <T,>(promise: Promise<T>, ms: number, message: string): Promise<T> =>
+    new Promise<T>((resolve, reject) => {
+      const timer = window.setTimeout(() => reject(new Error(message)), ms);
+      promise
+        .then((value) => {
+          window.clearTimeout(timer);
+          resolve(value);
+        })
+        .catch((timeoutError) => {
+          window.clearTimeout(timer);
+          reject(timeoutError);
+        });
+    });
+
+  const cleanupDeclinedAccountByEmail = async () => {
+    const cleanedEmail = email.trim().toLowerCase();
+    if (!cleanedEmail) {
+      return { success: false, error: "Email is required to clean up declined account data." };
+    }
+
+    setDeclineCleanupLoading(true);
+    try {
+      const { data, error } = await withTimeout(
+        supabase.functions.invoke("decline-user-cleanup", {
+          body: { email: cleanedEmail },
+        }),
+        12000,
+        "Cleanup request timed out."
+      );
+
+      if (error) {
+        console.error("decline-user-cleanup invoke error:", error);
+        return {
+          success: false,
+          error: "Unable to clean up declined account right now. Please try again.",
+        };
+      }
+
+      if (data?.success === false) {
+        return {
+          success: false,
+          error: data?.error || "Unable to clean up declined account right now.",
+        };
+      }
+
+      return { success: true };
+    } catch (cleanupError) {
+      console.error("decline-user-cleanup unexpected error:", cleanupError);
+      return {
+        success: false,
+        error: "Unexpected cleanup error. Please try again.",
+      };
+    } finally {
+      setDeclineCleanupLoading(false);
+    }
+  };
+
+  const handleDeclinedGotIt = async () => {
+    setDeclineAction("got-it");
+    await cleanupDeclinedAccountByEmail();
+
+    setShowErrorModal(false);
+    setDeclinedReason(null);
+    setDeclineAction(null);
+  };
+
+  const handleDeclinedRegisterAgain = async () => {
+    setDeclineAction("register-again");
+    await cleanupDeclinedAccountByEmail();
+
+    setShowErrorModal(false);
+    setDeclinedReason(null);
+    navigate("/signup", {
+      state: {
+        prefillEmail: email,
+      },
+    });
+    setDeclineAction(null);
+  };
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -54,8 +137,15 @@ const LoginPage = () => {
 
   useEffect(() => {
     if (user) {
-      // Redirect to landing/dashboard if user is authenticated
-      navigate("/");
+      // If a session already exists, send the user to the correct area.
+      const userRole = localStorage.getItem("userRole");
+      if (userRole === "admin") {
+        navigate("/admin-dashboard", { replace: true });
+      } else if (userRole === "vet") {
+        navigate("/vet-dashboard", { replace: true });
+      } else {
+        navigate("/home", { replace: true });
+      }
     }
   }, [user, navigate]);
 
@@ -217,12 +307,18 @@ const LoginPage = () => {
       <LoginErrorModal
         isOpen={showErrorModal}
         onClose={() => {
+          if (declineCleanupLoading) return;
           setShowErrorModal(false);
           setError("");
           setDeclinedReason(null);
+          setDeclineAction(null);
         }}
         errorMessage={error}
         declinedReason={declinedReason}
+        onDeclinedGotIt={declinedReason ? handleDeclinedGotIt : undefined}
+        onDeclinedRegisterAgain={declinedReason ? handleDeclinedRegisterAgain : undefined}
+        isDeclinedActionLoading={declineCleanupLoading}
+        declinedAction={declineAction}
       />
 
       {showVerifiedModal && (

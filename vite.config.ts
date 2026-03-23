@@ -57,10 +57,11 @@ export default defineConfig({
         globPatterns: ["**/*.{js,css,html,ico,png,svg,jpg,jpeg,webp}"],
         runtimeCaching: [
           {
-            urlPattern: /^https:\/\/.*\.supabase\.co\/.*/i,
-            handler: "NetworkFirst",
+            // Only cache public storage assets, never auth/database APIs.
+            urlPattern: /^https:\/\/.*\.supabase\.co\/storage\/v1\/object\/public\/.*/i,
+            handler: "CacheFirst",
             options: {
-              cacheName: "supabase-cache",
+              cacheName: "supabase-storage-cache",
               expiration: {
                 maxEntries: 50,
                 maxAgeSeconds: 60 * 60 * 24 // 24 hours
@@ -95,7 +96,8 @@ export default defineConfig({
         ]
       },
       devOptions: {
-        enabled: true,
+        // Keep service worker off in local dev to prevent stale auth behavior.
+        enabled: false,
         type: "module"
       }
     })

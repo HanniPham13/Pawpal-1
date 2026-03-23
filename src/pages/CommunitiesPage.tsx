@@ -83,8 +83,8 @@ export const CommunitiesPage = () => {
             transform: translateY(20px);
             transition: all 0.6s ease-out;
           }
-          .reveal.visible {
-            opacity: 1;
+          .reveal-visible {
+          opacity: 1;
             transform: translateY(0);
           }
         `}
@@ -92,3 +92,4 @@ export const CommunitiesPage = () => {
     </div>
   );
 };
+ 

@@ -258,12 +258,64 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   ): Promise<AuthResponse> => {
     try {
       const cleanedEmail = email.toLowerCase().trim();
+
+      const withTimeout = async <T,>(
+        promise: Promise<T>,
+        ms: number,
+        message: string
+      ): Promise<T> =>
+        new Promise<T>((resolve, reject) => {
+          const timer = window.setTimeout(() => reject(new Error(message)), ms);
+          promise
+            .then((value) => {
+              window.clearTimeout(timer);
+              resolve(value);
+            })
+            .catch((timeoutError) => {
+              window.clearTimeout(timer);
+              reject(timeoutError);
+            });
+        });
+
+      const invokeDeclinedCleanup = async (): Promise<boolean> => {
+        try {
+          const { data, error } = await withTimeout(
+            supabase.functions.invoke("decline-user-cleanup", {
+              body: { email: cleanedEmail },
+            }),
+            12000,
+            "Declined cleanup request timed out"
+          );
+
+          if (error) {
+            console.warn("decline-user-cleanup invoke failed:", error.message);
+            return false;
+          }
+
+          return data?.success !== false;
+        } catch (cleanupError) {
+          console.warn("decline-user-cleanup unexpected failure:", cleanupError);
+          return false;
+        }
+      };
+
+      // Ensure we are starting from a clean session to avoid weird auth redirects
+      // if the user was previously signed in on this device.
+      await supabase.auth.signOut();
+
+      // Best-effort cleanup for declined users before trying signup.
+      await invokeDeclinedCleanup();
+
       // CLEAN OUT DECLINED USER RECORD
-      await supabase
+      const { error: cleanupError } = await supabase
         .from("users")
         .delete()
-        .eq("email", cleanedEmail)
+        .ilike("email", cleanedEmail)
         .eq("declined", true);
+
+      if (cleanupError) {
+        console.warn("Failed to clean declined user prior to signup:", cleanupError.message);
+      }
 
       const fullName = first_name && last_name 
         ? `${first_name} ${last_name}` 
@@ -292,21 +344,28 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       console.log("Email redirect URL:", redirectUrl);
       const signUpStart = performance.now();
       
-      const { data: signUpData, error: authError } = await supabase.auth.signUp({
-        email: email.toLowerCase().trim(),
-        password,
-        options: {
-          data: {
-            email: email.toLowerCase().trim(),
-            full_name: fullName,
-            first_name,
-            last_name,
-            role,
-            adoption_validation: adoptionValidation || null,
+      const attemptSignUp = () =>
+        supabase.auth.signUp({
+          email: email.toLowerCase().trim(),
+          password,
+          options: {
+            data: {
+              email: email.toLowerCase().trim(),
+              full_name: fullName,
+              first_name,
+              last_name,
+              role,
+              adoption_validation: adoptionValidation || null,
+            },
+            emailRedirectTo: redirectUrl,
           },
-          emailRedirectTo: redirectUrl,
-        },
-      });
+        });
+
+      const { data: signUpData, error: authError } = await withTimeout(
+        attemptSignUp(),
+        15000,
+        "Signup is taking too long. Please check your connection and try again."
+      );
 
       console.log(
         `[signup] supabase.auth.signUp completed in ${Math.round(
@@ -328,9 +387,32 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
           authError.message.includes("already exists") ||
           authError.message.includes("User already registered")
         ) {
+          // If the email belongs to a previously declined user, cleanup can unlock signup.
+          const cleanupWorked = await invokeDeclinedCleanup();
+          if (cleanupWorked) {
+            const { data: retryData, error: retryError } = await withTimeout(
+              attemptSignUp(),
+              15000,
+              "Signup retry is taking too long. Please try again."
+            );
+
+            if (!retryError) {
+              if (retryData.user && !retryData.session) {
+                return {
+                  success: true,
+                  error: "Please check your email to verify your account before signing in.",
+                };
+              }
+              return { success: true };
+            }
+
+            console.warn("Signup retry still failed:", retryError.message);
+          }
+
           return {
             success: false,
-            error: "This email is already registered. Please use the login page to sign in.",
+            error:
+              "This email is still registered. If this account was declined, wait a few seconds and try Create Account again.",
           };
         }
         return { success: false, error: authError.message };

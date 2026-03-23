@@ -113,8 +113,7 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Keep auth user so login can show the exact declined reason modal.
-    // Access is still blocked by users.declined checks during sign-in.
+    // Keep auth metadata in sync so any cached session shows the decline state before deletion.
     const { error: metadataError } = await admin.auth.admin.updateUserById(targetUser.user_id, {
       user_metadata: {
         declined: true,
@@ -126,7 +125,27 @@ Deno.serve(async (req) => {
       console.error("Failed to sync decline metadata:", metadataError.message);
     }
 
-    // Remove the auth user to fully block access while retaining the declined row for auditing.
+    // Delete application data to let the user sign up again cleanly.
+    // Service role bypasses RLS, so we can hard-delete here.
+    const { error: profileDeleteError } = await admin
+      .from("profiles")
+      .delete()
+      .eq("id", targetUser.user_id);
+
+    if (profileDeleteError) {
+      console.warn("Profile cleanup failed (safe to ignore if table absent):", profileDeleteError.message);
+    }
+
+    const { error: userDeleteError } = await admin
+      .from("users")
+      .delete()
+      .eq("user_id", targetUser.user_id);
+
+    if (userDeleteError) {
+      console.error("Failed to delete user row after decline:", userDeleteError.message);
+    }
+
+    // Remove the auth user to fully block access and cascade other FK rows.
     let authDeleted = false;
     const { error: deleteError } = await admin.auth.admin.deleteUser(targetUser.user_id);
     if (deleteError) {
@@ -140,6 +159,7 @@ Deno.serve(async (req) => {
       declinedUserId: targetUser.user_id,
       email: targetUser.email,
       authDeleted,
+      dbDeleted: !userDeleteError,
     });
   } catch (error) {
     return json(

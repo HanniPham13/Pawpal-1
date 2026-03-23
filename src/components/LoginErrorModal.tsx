@@ -5,6 +5,10 @@ interface LoginErrorModalProps {
   onClose: () => void;
   errorMessage?: string;
   declinedReason?: string | null;
+  onDeclinedGotIt?: () => Promise<void> | void;
+  onDeclinedRegisterAgain?: () => Promise<void> | void;
+  isDeclinedActionLoading?: boolean;
+  declinedAction?: "got-it" | "register-again" | null;
 }
 
 export const LoginErrorModal = ({
@@ -12,6 +16,10 @@ export const LoginErrorModal = ({
   onClose,
   errorMessage,
   declinedReason,
+  onDeclinedGotIt,
+  onDeclinedRegisterAgain,
+  isDeclinedActionLoading = false,
+  declinedAction = null,
 }: LoginErrorModalProps) => {
   if (!isOpen) return null;
 
@@ -56,17 +64,37 @@ export const LoginErrorModal = ({
                 If you believe this is a mistake, you may contact support or <b>register with your email again</b>.
               </p>
               <div className="flex gap-3">
-                <a
-                  href="/signup"
-                  className="flex-1 px-4 py-3 bg-gradient-to-r from-indigo-500 to-purple-500 hover:from-indigo-600 hover:to-purple-600 text-white rounded-xl font-bold transition-all duration-200 shadow-sm hover:shadow-md font-['Inter'] text-base"
-                >
-                  Register Again
-                </a>
                 <button
-                  onClick={onClose}
-                  className="flex-1 px-4 py-3 bg-gray-200 hover:bg-gray-300 text-gray-700 rounded-xl font-semibold transition-all duration-200 font-['Inter'] text-base border border-gray-300"
+                  type="button"
+                  onClick={() => {
+                    if (onDeclinedRegisterAgain) {
+                      void onDeclinedRegisterAgain();
+                      return;
+                    }
+                    window.location.href = "/signup";
+                  }}
+                  disabled={isDeclinedActionLoading}
+                  className="flex-1 px-4 py-3 bg-gradient-to-r from-indigo-500 to-purple-500 hover:from-indigo-600 hover:to-purple-600 text-white rounded-xl font-bold transition-all duration-200 shadow-sm hover:shadow-md font-['Inter'] text-base disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  Got It
+                  {isDeclinedActionLoading && declinedAction === "register-again"
+                    ? "Processing..."
+                    : "Register Again"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (onDeclinedGotIt) {
+                      void onDeclinedGotIt();
+                      return;
+                    }
+                    onClose();
+                  }}
+                  disabled={isDeclinedActionLoading}
+                  className="flex-1 px-4 py-3 bg-gray-200 hover:bg-gray-300 text-gray-700 rounded-xl font-semibold transition-all duration-200 font-['Inter'] text-base border border-gray-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {isDeclinedActionLoading && declinedAction === "got-it"
+                    ? "Processing..."
+                    : "Got It"}
                 </button>
               </div>
             </>
