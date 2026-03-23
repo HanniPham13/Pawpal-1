@@ -4,7 +4,7 @@ import { FaTimes, FaExclamationTriangle } from "react-icons/fa";
 interface DeclineUserModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onConfirm: (reason: string) => void;
+  onConfirm: (reason: string) => Promise<void> | void;
   userName?: string;
 }
 
@@ -26,6 +26,7 @@ export const DeclineUserModal = ({
   const [selectedReason, setSelectedReason] = useState<string>("");
   const [customReason, setCustomReason] = useState<string>("");
   const [isOtherSelected, setIsOtherSelected] = useState<boolean>(false);
+  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
 
   if (!isOpen) return null;
 
@@ -37,17 +38,17 @@ export const DeclineUserModal = ({
     }
   };
 
-  const handleConfirm = () => {
+  const handleConfirm = async () => {
     const finalReason = isOtherSelected && customReason.trim()
       ? customReason.trim()
       : selectedReason || customReason.trim() || "";
-    
-    onConfirm(finalReason);
-    // Reset form
-    setSelectedReason("");
-    setCustomReason("");
-    setIsOtherSelected(false);
-    onClose();
+
+    setIsSubmitting(true);
+    try {
+      await onConfirm(finalReason);
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const handleClose = () => {
@@ -55,6 +56,7 @@ export const DeclineUserModal = ({
     setSelectedReason("");
     setCustomReason("");
     setIsOtherSelected(false);
+    setIsSubmitting(false);
     onClose();
   };
 
@@ -143,15 +145,17 @@ export const DeclineUserModal = ({
         <div className="flex gap-3">
           <button
             onClick={handleClose}
+            disabled={isSubmitting}
             className="flex-1 px-4 py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl font-semibold transition-all duration-200 font-['Inter']"
           >
             Cancel
           </button>
           <button
             onClick={handleConfirm}
+            disabled={isSubmitting}
             className="flex-1 px-4 py-3 bg-gradient-to-r from-red-500 to-pink-500 hover:from-red-600 hover:to-pink-600 text-white rounded-xl font-semibold transition-all duration-200 shadow-sm hover:shadow-md font-['Inter']"
           >
-            Decline Account
+            {isSubmitting ? "Declining..." : "Decline Account"}
           </button>
         </div>
       </div>

@@ -1,11 +1,13 @@
 import { useState, useEffect } from "react";
-import { useNavigate, Link } from "react-router-dom";
+import { useNavigate, Link, useLocation } from "react-router-dom";
 import { FaPaw, FaLock, FaEnvelope, FaEye, FaEyeSlash } from "react-icons/fa";
 import { useAuth } from "../context/AuthContext";
 import { LoginErrorModal } from "../components/LoginErrorModal";
+import { supabase } from "../supabase-client";
 
 const LoginPage = () => {
   const navigate = useNavigate();
+  const location = useLocation();
   const { signInWithEmail, user } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -14,6 +16,90 @@ const LoginPage = () => {
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [showErrorModal, setShowErrorModal] = useState(false);
+  const [showVerifiedModal, setShowVerifiedModal] = useState(false);
+  const [verifiedMessage, setVerifiedMessage] = useState<string | null>(null);
+  const [declineCleanupLoading, setDeclineCleanupLoading] = useState(false);
+  const [declineAction, setDeclineAction] = useState<"got-it" | "register-again" | null>(null);
+
+  const withTimeout = async <T,>(promise: Promise<T>, ms: number, message: string): Promise<T> =>
+    new Promise<T>((resolve, reject) => {
+      const timer = window.setTimeout(() => reject(new Error(message)), ms);
+      promise
+        .then((value) => {
+          window.clearTimeout(timer);
+          resolve(value);
+        })
+        .catch((timeoutError) => {
+          window.clearTimeout(timer);
+          reject(timeoutError);
+        });
+    });
+
+  const cleanupDeclinedAccountByEmail = async () => {
+    const cleanedEmail = email.trim().toLowerCase();
+    if (!cleanedEmail) {
+      return { success: false, error: "Email is required to clean up declined account data." };
+    }
+
+    setDeclineCleanupLoading(true);
+    try {
+      const { data, error } = await withTimeout(
+        supabase.functions.invoke("decline-user-cleanup", {
+          body: { email: cleanedEmail },
+        }),
+        12000,
+        "Cleanup request timed out."
+      );
+
+      if (error) {
+        console.error("decline-user-cleanup invoke error:", error);
+        return {
+          success: false,
+          error: "Unable to clean up declined account right now. Please try again.",
+        };
+      }
+
+      if (data?.success === false) {
+        return {
+          success: false,
+          error: data?.error || "Unable to clean up declined account right now.",
+        };
+      }
+
+      return { success: true };
+    } catch (cleanupError) {
+      console.error("decline-user-cleanup unexpected error:", cleanupError);
+      return {
+        success: false,
+        error: "Unexpected cleanup error. Please try again.",
+      };
+    } finally {
+      setDeclineCleanupLoading(false);
+    }
+  };
+
+  const handleDeclinedGotIt = async () => {
+    setDeclineAction("got-it");
+    await cleanupDeclinedAccountByEmail();
+
+    setShowErrorModal(false);
+    setDeclinedReason(null);
+    setDeclineAction(null);
+  };
+
+  const handleDeclinedRegisterAgain = async () => {
+    setDeclineAction("register-again");
+    await cleanupDeclinedAccountByEmail();
+
+    setShowErrorModal(false);
+    setDeclinedReason(null);
+    navigate("/signup", {
+      state: {
+        prefillEmail: email,
+      },
+    });
+    setDeclineAction(null);
+  };
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -21,35 +107,59 @@ const LoginPage = () => {
     setError("");
     setDeclinedReason(null);
 
-    const { success, error, declinedReason } = await signInWithEmail(email, password);
+    try {
+      const { success, error, declinedReason } = await signInWithEmail(email, password);
 
-    if (!success) {
-      setError(error || "Failed to sign in");
-      setDeclinedReason(declinedReason || null);
+      if (!success) {
+        setError(error || "Failed to sign in");
+        setDeclinedReason(declinedReason || null);
+        setShowErrorModal(true);
+        return;
+      }
+
+      // Navigate based on role
+      const userRole = localStorage.getItem("userRole");
+      if (userRole === "admin") {
+        navigate("/admin-dashboard");
+      } else if (userRole === "vet") {
+        navigate("/vet-dashboard");
+      } else {
+        navigate("/home");
+      }
+    } catch (err) {
+      console.error("Login attempt failed:", err);
+      setError("Something went wrong while signing in. Please try again.");
       setShowErrorModal(true);
+    } finally {
       setLoading(false);
-      return;
     }
-
-    // Navigate based on role
-    const userRole = localStorage.getItem("userRole");
-    if (userRole === "admin") {
-      navigate("/admin-dashboard");
-    } else if (userRole === "vet") {
-      navigate("/vet-dashboard");
-    } else {
-      navigate("/home");
-    }
-
-    setLoading(false);
   };
 
   useEffect(() => {
     if (user) {
-      // Redirect to landing/dashboard if user is authenticated
-      navigate("/");
+      // If a session already exists, send the user to the correct area.
+      const userRole = localStorage.getItem("userRole");
+      if (userRole === "admin") {
+        navigate("/admin-dashboard", { replace: true });
+      } else if (userRole === "vet") {
+        navigate("/vet-dashboard", { replace: true });
+      } else {
+        navigate("/home", { replace: true });
+      }
     }
   }, [user, navigate]);
+
+  useEffect(() => {
+    const state = location.state as { verifiedThankYou?: boolean; message?: string } | null;
+    if (state?.verifiedThankYou) {
+      setVerifiedMessage(
+        state.message ||
+          "Thank you for confirming your email. Please wait for an admin to verify your account (up to 24 hours)."
+      );
+      setShowVerifiedModal(true);
+      navigate(location.pathname, { replace: true, state: {} });
+    }
+  }, [location.state, location.pathname, navigate]);
 
   return (
     <div className="min-h-screen flex flex-col md:flex-row bg-gray-50">
@@ -197,13 +307,48 @@ const LoginPage = () => {
       <LoginErrorModal
         isOpen={showErrorModal}
         onClose={() => {
+          if (declineCleanupLoading) return;
           setShowErrorModal(false);
           setError("");
           setDeclinedReason(null);
+          setDeclineAction(null);
         }}
         errorMessage={error}
         declinedReason={declinedReason}
+        onDeclinedGotIt={declinedReason ? handleDeclinedGotIt : undefined}
+        onDeclinedRegisterAgain={declinedReason ? handleDeclinedRegisterAgain : undefined}
+        isDeclinedActionLoading={declineCleanupLoading}
+        declinedAction={declineAction}
       />
+
+      {showVerifiedModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
+          <div className="bg-white rounded-2xl shadow-xl p-6 w-full max-w-md text-left">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-12 h-12 rounded-full bg-violet-100 text-violet-700 flex items-center justify-center text-xl">
+                <FaEnvelope />
+              </div>
+              <div>
+                <p className="text-sm text-gray-500 font-semibold">Email confirmed</p>
+                <h3 className="text-xl font-bold text-gray-900">Thank you!</h3>
+              </div>
+            </div>
+            <p className="text-gray-700 mb-6 leading-relaxed">
+              {verifiedMessage ||
+                "Please wait for an admin to verify your account. This review can take up to 24 hours."}
+            </p>
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={() => setShowVerifiedModal(false)}
+                className="bg-violet-600 text-white px-4 py-2 rounded-lg font-semibold hover:bg-violet-700 transition"
+              >
+                Got it
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

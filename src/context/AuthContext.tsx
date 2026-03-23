@@ -40,6 +40,24 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const [user, setUser] = useState<User | null>(null);
   const [role, setRole] = useState<string | null>(null);
 
+  const shouldBlockPendingUserSession = async (sessionUser: User) => {
+    const { data: userData, error } = await supabase
+      .from("users")
+      .select("role, verified")
+      .eq("user_id", sessionUser.id)
+      .maybeSingle();
+
+    // If this is a regular user session but profile row is not ready yet,
+    // keep them pending and signed out until admin/vet verification exists.
+    const metadataRole = sessionUser.user_metadata?.role;
+    if (!userData) {
+      return metadataRole === "user";
+    }
+
+    if (error) return false;
+    return userData.role === "user" && userData.verified !== true;
+  };
+
   const fetchUserRole = async (userId: string) => {
     const { data, error } = await supabase
       .from("users") // or 'profiles' if that's your table
@@ -62,8 +80,22 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     // Listen for auth changes
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUser(session?.user ?? null);
+    } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      if (!session?.user) {
+        setUser(null);
+        return;
+      }
+
+      const blockPendingSession = await shouldBlockPendingUserSession(session.user);
+
+      if (blockPendingSession) {
+        await supabase.auth.signOut();
+        localStorage.removeItem("userRole");
+        setUser(null);
+        return;
+      }
+
+      setUser(session.user);
     });
 
     return () => {
@@ -132,10 +164,19 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       console.log("Final adoption validation for upsert:", finalAdoptionValidation);
       console.log("Preserving role:", finalRole, "(existing:", existingUser?.role, ", metadata:", user.user_metadata?.role, ")");
       
+      // Build full_name: try metadata full_name, then first+last, then email prefix
+      const resolvedFullName = 
+        user.user_metadata?.full_name ||
+        (user.user_metadata?.first_name
+          ? `${user.user_metadata.first_name}${user.user_metadata?.last_name ? ' ' + user.user_metadata.last_name : ''}`
+          : null) ||
+        user.email?.split("@")[0] ||
+        null;
+
       const userData = {
         user_id: user.id,
         email: user.email || "",
-        full_name: user.user_metadata?.full_name || user.email?.split("@")[0] || "Unknown",
+        full_name: resolvedFullName,
         role: finalRole,
         adoption_validation: finalAdoptionValidation,
         created_at: new Date().toISOString(),
@@ -186,7 +227,21 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       const {
         data: { session },
       } = await supabase.auth.getSession();
-      setUser(session?.user ?? null);
+      if (!session?.user) {
+        setUser(null);
+        return;
+      }
+
+      const blockPendingSession = await shouldBlockPendingUserSession(session.user);
+
+      if (blockPendingSession) {
+        await supabase.auth.signOut();
+        localStorage.removeItem("userRole");
+        setUser(null);
+        return;
+      }
+
+      setUser(session.user);
     } catch (error) {
       console.error("Error checking user session:", error);
       setUser(null);
@@ -203,12 +258,64 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   ): Promise<AuthResponse> => {
     try {
       const cleanedEmail = email.toLowerCase().trim();
+
+      const withTimeout = async <T,>(
+        promise: Promise<T>,
+        ms: number,
+        message: string
+      ): Promise<T> =>
+        new Promise<T>((resolve, reject) => {
+          const timer = window.setTimeout(() => reject(new Error(message)), ms);
+          promise
+            .then((value) => {
+              window.clearTimeout(timer);
+              resolve(value);
+            })
+            .catch((timeoutError) => {
+              window.clearTimeout(timer);
+              reject(timeoutError);
+            });
+        });
+
+      const invokeDeclinedCleanup = async (): Promise<boolean> => {
+        try {
+          const { data, error } = await withTimeout(
+            supabase.functions.invoke("decline-user-cleanup", {
+              body: { email: cleanedEmail },
+            }),
+            12000,
+            "Declined cleanup request timed out"
+          );
+
+          if (error) {
+            console.warn("decline-user-cleanup invoke failed:", error.message);
+            return false;
+          }
+
+          return data?.success !== false;
+        } catch (cleanupError) {
+          console.warn("decline-user-cleanup unexpected failure:", cleanupError);
+          return false;
+        }
+      };
+
+      // Ensure we are starting from a clean session to avoid weird auth redirects
+      // if the user was previously signed in on this device.
+      await supabase.auth.signOut();
+
+      // Best-effort cleanup for declined users before trying signup.
+      await invokeDeclinedCleanup();
+
       // CLEAN OUT DECLINED USER RECORD
-      await supabase
+      const { error: cleanupError } = await supabase
         .from("users")
         .delete()
-        .eq("email", cleanedEmail)
+        .ilike("email", cleanedEmail)
         .eq("declined", true);
+
+      if (cleanupError) {
+        console.warn("Failed to clean declined user prior to signup:", cleanupError.message);
+      }
 
       const fullName = first_name && last_name 
         ? `${first_name} ${last_name}` 
@@ -231,25 +338,40 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       }
 
       // Step 1: Sign up with Supabase
-      const redirectUrl = `${window.location.origin}/verify-email`;
+      // Force Supabase to always return to the verify page with an explicit type so our callback guard runs.
+      const redirectUrl = `${window.location.origin}/verify-email?type=signup`;
       console.log("Signing up user with email:", email.toLowerCase().trim());
       console.log("Email redirect URL:", redirectUrl);
+      const signUpStart = performance.now();
       
-      const { data: signUpData, error: authError } = await supabase.auth.signUp({
-        email: email.toLowerCase().trim(),
-        password,
-        options: {
-          data: {
-            email: email.toLowerCase().trim(),
-            full_name: fullName,
-            first_name,
-            last_name,
-            role,
-            adoption_validation: adoptionValidation || null,
+      const attemptSignUp = () =>
+        supabase.auth.signUp({
+          email: email.toLowerCase().trim(),
+          password,
+          options: {
+            data: {
+              email: email.toLowerCase().trim(),
+              full_name: fullName,
+              first_name,
+              last_name,
+              role,
+              adoption_validation: adoptionValidation || null,
+            },
+            emailRedirectTo: redirectUrl,
           },
-          emailRedirectTo: redirectUrl,
-        },
-      });
+        });
+
+      const { data: signUpData, error: authError } = await withTimeout(
+        attemptSignUp(),
+        15000,
+        "Signup is taking too long. Please check your connection and try again."
+      );
+
+      console.log(
+        `[signup] supabase.auth.signUp completed in ${Math.round(
+          performance.now() - signUpStart
+        )}ms`
+      );
 
       console.log("Signup response:", { 
         user: signUpData?.user?.id, 
@@ -265,58 +387,39 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
           authError.message.includes("already exists") ||
           authError.message.includes("User already registered")
         ) {
+          // If the email belongs to a previously declined user, cleanup can unlock signup.
+          const cleanupWorked = await invokeDeclinedCleanup();
+          if (cleanupWorked) {
+            const { data: retryData, error: retryError } = await withTimeout(
+              attemptSignUp(),
+              15000,
+              "Signup retry is taking too long. Please try again."
+            );
+
+            if (!retryError) {
+              if (retryData.user && !retryData.session) {
+                return {
+                  success: true,
+                  error: "Please check your email to verify your account before signing in.",
+                };
+              }
+              return { success: true };
+            }
+
+            console.warn("Signup retry still failed:", retryError.message);
+          }
+
           return {
             success: false,
-            error: "This email is already registered. Please use the login page to sign in.",
+            error:
+              "This email is still registered. If this account was declined, wait a few seconds and try Create Account again.",
           };
         }
         return { success: false, error: authError.message };
       }
 
-      // If user was created, try to insert into users table immediately
-      // This might fail due to RLS, but we'll retry after email verification
-      if (signUpData?.user?.id) {
-        console.log("Attempting to insert user into users table:", signUpData.user.id);
-        
-        // Prepare adoption validation - filter out empty values
-        let finalAdoptionValidation = null;
-        if (adoptionValidation && typeof adoptionValidation === 'object') {
-          finalAdoptionValidation = Object.fromEntries(
-            Object.entries(adoptionValidation).filter(([_, value]) => value && value.trim && value.trim() !== '')
-          );
-          if (Object.keys(finalAdoptionValidation).length === 0) {
-            finalAdoptionValidation = null;
-          }
-        }
-        
-        console.log("Adoption validation being saved:", finalAdoptionValidation);
-        
-        const { error: insertError, data: insertData } = await supabase
-          .from("users")
-          .insert([
-            {
-              user_id: signUpData.user.id,
-              email: email.toLowerCase().trim(),
-              full_name: fullName,
-              role,
-              adoption_validation: finalAdoptionValidation,
-              created_at: new Date().toISOString()
-            }
-          ])
-          .select();
-        
-        if (insertError) {
-          console.error("Failed to insert user profile on sign up (this is OK, will retry after verification):", insertError);
-          console.error("Insert error details:", JSON.stringify(insertError, null, 2));
-          // Keep adoption validation in localStorage for retry after email verification
-        } else {
-          console.log("Successfully inserted user profile:", insertData);
-          // Clear localStorage since we successfully saved it
-          if (finalAdoptionValidation) {
-            localStorage.removeItem("pendingAdoptionValidation");
-          }
-        }
-      }
+      // Do not block signup with an extra users-table insert here.
+      // The verification callback page and session hooks already upsert the profile.
 
       // If user was created but no session (email confirmation required)
       if (signUpData.user && !signUpData.session) {
@@ -374,12 +477,30 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       console.log("Attempting to sign in...");
       const cleanedEmail = email.toLowerCase().trim();
       
-      // FIRST: Check if user is declined BEFORE attempting password authentication
+      // FIRST: Check decline log (covers cases where the account was deleted after being declined)
+      const { data: declineLogData, error: declineLogError } = await supabase.rpc(
+        "get_decline_reason",
+        { email_input: cleanedEmail }
+      );
+
+      const declineLogEntry = Array.isArray(declineLogData)
+        ? declineLogData[0]
+        : declineLogData;
+
+      if (!declineLogError && declineLogEntry?.reason) {
+        return {
+          success: false,
+          error: "Your account has been declined and you cannot log in.",
+          declinedReason: declineLogEntry.reason,
+        };
+      }
+
+      // SECOND: Check if user is declined BEFORE attempting password authentication
       // This way we can show the decline modal even if password is wrong
       const { data: declinedCheck, error: declinedCheckError } = await supabase
         .from("users")
         .select("declined, declined_reason, user_id")
-        .eq("email", cleanedEmail)
+        .ilike("email", cleanedEmail)
         .maybeSingle();
 
       // If we found a declined user, return decline reason immediately
@@ -387,7 +508,9 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         return {
           success: false,
           error: "Your account has been declined and you cannot log in.",
-          declinedReason: declinedCheck.declined_reason || null,
+          declinedReason:
+            declinedCheck.declined_reason ||
+            "Your account was declined during veterinary review.",
         };
       }
 
@@ -443,7 +566,9 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         return {
           success: false,
           error: "Your account has been declined and you cannot log in.",
-          declinedReason: userData.declined_reason || null,
+          declinedReason:
+            userData.declined_reason ||
+            "Your account was declined during veterinary review.",
         };
       }
 
@@ -481,7 +606,11 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
             user_id: data.user.id,
             email: data.user.email,
             role: userData?.role || "user", // userData comes from database query, so it's already the correct role
-            full_name: data.user.user_metadata?.full_name || data.user.email?.split("@")[0] || "Unknown",
+            full_name: data.user.user_metadata?.full_name ||
+              (data.user.user_metadata?.first_name
+                ? `${data.user.user_metadata.first_name}${data.user.user_metadata?.last_name ? ' ' + data.user.user_metadata.last_name : ''}`
+                : null) ||
+              data.user.email?.split("@")[0] || null,
             adoption_validation: adoptionValidation,
             created_at: new Date().toISOString(),
           }

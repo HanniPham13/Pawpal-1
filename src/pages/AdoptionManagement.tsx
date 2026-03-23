@@ -555,7 +555,7 @@ export default function AdoptionManagement() {
           image_url: p.image_url || null,
           adopted_at: p.updated_at || p.created_at || null,
           adopter_id: null,
-          adopter_name: "Adopter information not available",
+          adopter_name: null,
           adopter_email: null,
         }));
       }

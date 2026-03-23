@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { useNavigate, Link } from "react-router-dom";
+import { useEffect, useMemo, useState } from "react";
+import { useNavigate, Link, useLocation } from "react-router-dom";
 import { FaPaw, FaLock, FaEnvelope, FaUser, FaEye, FaEyeSlash } from "react-icons/fa";
 import { useAuth } from "../context/AuthContext";
 import { TermsOfServiceModal } from "../components/TermsOfServiceModal";
@@ -16,6 +16,7 @@ interface AdoptionValidation {
 
 const SignUpPage = () => {
   const navigate = useNavigate();
+  const location = useLocation();
   const { signUpWithEmail } = useAuth();
   const [email, setEmail] = useState("");
   const [firstName, setFirstName] = useState("");
@@ -38,6 +39,18 @@ const SignUpPage = () => {
   });
 
   const [step, setStep] = useState<1 | 2 | 3 | 4>(1);
+
+  const incomingState = location.state as { prefillEmail?: string } | null;
+
+  useEffect(() => {
+    if (!incomingState) return;
+
+    if (incomingState.prefillEmail) {
+      setEmail((prev) => prev || incomingState.prefillEmail || "");
+    }
+
+    navigate(location.pathname, { replace: true, state: {} });
+  }, [incomingState, location.pathname, navigate]);
 
   const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[\W_]).{8,}$/;
   const adoptionQuestions = useMemo(

@@ -8,119 +8,184 @@ const VerifyEmailPage = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const { resendVerificationEmail } = useAuth();
-  const { email, message } = location.state || {
+  const { email, message, pendingApproval } = location.state || {
     email: "",
-    message: "Please check your email to verify your account before signing in."
+    message: "Please check your email to verify your account before signing in.",
+    pendingApproval: false,
   };
   
   const [resending, setResending] = useState(false);
   const [resendMessage, setResendMessage] = useState("");
+  const [resendCooldown, setResendCooldown] = useState(0);
+  const [isVerified, setIsVerified] = useState(false);
+  const [isProcessingVerification, setIsProcessingVerification] = useState(false);
+
+  const successMessage =
+    "Thank you for confirming your email. Please wait for an admin to verify your account (up to 24 hours).";
+
+  const waitingApprovalMessage =
+    message ||
+    "Thankyou for verifying, please wait for the admin to process your account.";
+
+  const upsertVerifiedUser = async () => {
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+
+    if (!session?.user) {
+      setResendMessage("Verification failed. Please try again or resend the email.");
+      return;
+    }
+
+    // Get adoption validation from localStorage
+    let adoptionValidation = null;
+    const cached = localStorage.getItem("pendingAdoptionValidation");
+    if (cached) {
+      try {
+        const parsed = JSON.parse(cached);
+        if (parsed && typeof parsed === "object" && Object.keys(parsed).length > 0) {
+          adoptionValidation = Object.fromEntries(
+            Object.entries(parsed).filter(
+              ([_, value]) =>
+                value &&
+                (typeof value === "string"
+                  ? value.trim() !== ""
+                  : value !== null && value !== undefined)
+            )
+          );
+          if (Object.keys(adoptionValidation).length === 0) {
+            adoptionValidation = null;
+          }
+        }
+      } catch (parseError) {
+        console.error("Failed to parse adoption validation:", parseError);
+      }
+    }
+
+    const { data: existingUser } = await supabase
+      .from("users")
+      .select("adoption_validation")
+      .eq("user_id", session.user.id)
+      .maybeSingle();
+
+    const finalAdoptionValidation =
+      adoptionValidation || existingUser?.adoption_validation || null;
+
+    const userData = {
+      user_id: session.user.id,
+      email: session.user.email || "",
+      full_name:
+        session.user.user_metadata?.full_name ||
+        (session.user.user_metadata?.first_name
+          ? `${session.user.user_metadata.first_name}${
+              session.user.user_metadata?.last_name
+                ? " " + session.user.user_metadata.last_name
+                : ""
+            }`
+          : null) ||
+        session.user.email?.split("@")[0] ||
+        null,
+      role: session.user.user_metadata?.role || "user",
+      adoption_validation: finalAdoptionValidation,
+      created_at: new Date().toISOString(),
+    };
+
+    const { error: upsertError } = await supabase
+      .from("users")
+      .upsert([userData], { onConflict: "user_id" });
+
+    if (upsertError) {
+      console.error("Failed to upsert user after email verification:", upsertError);
+      const { error: insertError } = await supabase.from("users").insert([userData]);
+      if (insertError) {
+        console.error("Insert fallback also failed:", insertError);
+      }
+    }
+
+    if (cached) {
+      localStorage.removeItem("pendingAdoptionValidation");
+    }
+
+    setIsVerified(true);
+    setResendMessage(successMessage);
+
+    // Prevent automatic login redirect after verification by ending the session here.
+    await supabase.auth.signOut();
+
+    navigate("/login", {
+      replace: true,
+      state: {
+        verifiedThankYou: true,
+        message: successMessage,
+      },
+    });
+  };
 
   // Handle email verification callback from Supabase
   useEffect(() => {
     const handleVerification = async () => {
-      // Check for hash fragments in URL (Supabase email verification callback)
+      // Support both legacy hash callbacks and query-token callbacks.
       const hashParams = new URLSearchParams(window.location.hash.substring(1));
-      const accessToken = hashParams.get("access_token");
-      const type = hashParams.get("type");
+      const queryParams = new URLSearchParams(window.location.search);
 
-      if (accessToken && type === "signup") {
-        try {
-          // Supabase automatically handles the session when the token is in the URL
-          // Just wait a moment for the session to be established
-          await new Promise(resolve => setTimeout(resolve, 1000));
-          
-          const { data: { session } } = await supabase.auth.getSession();
-          if (session && session.user) {
-            console.log("Email verified, session established. Inserting user into users table...");
-            
-            // Get adoption validation from localStorage
-            let adoptionValidation = null;
-            const cached = localStorage.getItem("pendingAdoptionValidation");
-            if (cached) {
-              try {
-                const parsed = JSON.parse(cached);
-                // Validate that it's an object with at least one property
-                if (parsed && typeof parsed === 'object' && Object.keys(parsed).length > 0) {
-                  // Filter out empty values
-                  adoptionValidation = Object.fromEntries(
-                    Object.entries(parsed).filter(([_, value]) => value && (typeof value === 'string' ? value.trim() !== '' : value !== null && value !== undefined))
-                  );
-                  if (Object.keys(adoptionValidation).length === 0) {
-                    adoptionValidation = null;
-                  }
-                  console.log("Found and validated adoption validation in localStorage:", adoptionValidation);
-                } else {
-                  console.warn("Adoption validation in localStorage is empty or invalid");
-                }
-              } catch (e) {
-                console.error("Failed to parse adoption validation:", e);
-              }
-            }
-            
-            // Check if user already exists to preserve existing adoption_validation if no cached one
-            const { data: existingUser } = await supabase
-              .from("users")
-              .select("adoption_validation")
-              .eq("user_id", session.user.id)
-              .maybeSingle();
-            
-            // Use cached adoption validation if available, otherwise preserve existing
-            // Prioritize cached validation over existing to ensure new answers are saved
-            const finalAdoptionValidation = adoptionValidation || existingUser?.adoption_validation || null;
-            
-            console.log("Final adoption validation to save:", finalAdoptionValidation);
-            
-            // Insert/upsert user into users table
-            const userData = {
-              user_id: session.user.id,
-              email: session.user.email || "",
-              full_name: session.user.user_metadata?.full_name || session.user.email?.split("@")[0] || "Unknown",
-              role: session.user.user_metadata?.role || "user",
-              adoption_validation: finalAdoptionValidation,
-              created_at: new Date().toISOString(),
-            };
-            
-            console.log("Upserting user data after email verification:", userData);
-            console.log("Adoption validation being saved:", finalAdoptionValidation);
-            
-            const { data: upsertData, error: upsertError } = await supabase
-              .from("users")
-              .upsert([userData], { onConflict: 'user_id' })
-              .select();
-            
-            if (upsertError) {
-              console.error("Failed to upsert user after email verification:", upsertError);
-              // Try insert as fallback
-              const { error: insertError } = await supabase
-                .from("users")
-                .insert([userData]);
-              if (insertError) {
-                console.error("Insert fallback also failed:", insertError);
-              } else {
-                console.log("Insert fallback succeeded");
-                if (cached) localStorage.removeItem("pendingAdoptionValidation");
-              }
-            } else {
-              console.log("Successfully upserted user after email verification:", upsertData);
-              if (cached) localStorage.removeItem("pendingAdoptionValidation");
-            }
-            
-            setResendMessage("Verification Successful, please wait for the veterinary to check your assessment before you can log in.");
-          } else {
-            setResendMessage("Verification failed. Please try again or resend the email.");
-          }
-        } catch (error) {
-          console.error("Verification error:", error);
-          setResendMessage("Verification failed. Please try again or resend the email.");
+      const accessToken = hashParams.get("access_token");
+      const hashType = hashParams.get("type");
+      const tokenHash = queryParams.get("token_hash");
+      const queryType = queryParams.get("type");
+
+      // Some Supabase emails might omit the type query param; default to signup when a token is present.
+      const normalizedType = queryType || hashType || "signup";
+
+      const isHashSignupVerification = !!accessToken && normalizedType === "signup";
+      const isQuerySignupVerification = !!tokenHash && normalizedType === "signup";
+
+      if (!isHashSignupVerification && !isQuerySignupVerification) {
+        return;
+      }
+
+      setIsProcessingVerification(true);
+
+      try {
+        if (isQuerySignupVerification && tokenHash) {
+          const { error } = await supabase.auth.verifyOtp({
+            type: "signup",
+            token_hash: tokenHash,
+          });
+          if (error) throw error;
+        } else {
+          // Legacy flow: wait for session from hash callback.
+          await new Promise((resolve) => setTimeout(resolve, 1000));
         }
+
+        await upsertVerifiedUser();
+      } catch (error) {
+        console.error("Verification error:", error);
+        setResendMessage("Verification failed. Please try again or resend the email.");
+      } finally {
+        setIsProcessingVerification(false);
       }
     };
 
     handleVerification();
   }, [navigate]);
 
+  useEffect(() => {
+    if (resendCooldown <= 0) return;
+    const timer = window.setInterval(() => {
+      setResendCooldown((prev) => (prev > 0 ? prev - 1 : 0));
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, [resendCooldown]);
+
   const handleResend = async () => {
+    if (resendCooldown > 0) {
+      setResendMessage(
+        `Please wait ${resendCooldown}s before requesting another email.`
+      );
+      return;
+    }
+
     if (!email) {
       setResendMessage("Email address is required to resend verification.");
       return;
@@ -133,6 +198,7 @@ const VerifyEmailPage = () => {
     
     if (success) {
       setResendMessage("Verification email sent! Please check your inbox.");
+      setResendCooldown(60);
     } else {
       setResendMessage(error || "Failed to resend email. Please try again.");
     }
@@ -180,37 +246,65 @@ const VerifyEmailPage = () => {
               <FaEnvelope className="text-violet-600 text-xl md:text-3xl" />
             </div>
             <h2 className="text-2xl md:text-3xl font-bold mb-2 text-gray-900">
-              Check your email
+              {isVerified || pendingApproval ? "Registration Received" : "Check your email"}
             </h2>
-            {email && (
+
+            {isProcessingVerification && (
+              <p className="text-gray-600 mb-2 md:mb-6 break-words">
+                Verifying your account...
+              </p>
+            )}
+
+            {!isVerified && !pendingApproval && !isProcessingVerification && email && (
               <p className="text-gray-600 mb-3 md:mb-4 break-words">
                 We've sent a verification link to:
                 <br />
                 <span className="font-semibold text-gray-800">{email}</span>
               </p>
             )}
-            <p className="text-gray-600 mb-2 md:mb-6 break-words">{message}</p>
+
+            {!isVerified && !pendingApproval && !isProcessingVerification && (
+              <p className="text-gray-600 mb-2 md:mb-6 break-words">{message}</p>
+            )}
+
+            {pendingApproval && !isProcessingVerification && (
+              <p className="text-gray-700 mb-2 md:mb-6 break-words font-medium">
+                {waitingApprovalMessage}
+              </p>
+            )}
+
+            {isVerified && (
+              <p className="text-gray-700 mb-2 md:mb-6 break-words font-medium">
+                {successMessage}
+              </p>
+            )}
           </div>
 
           <div className="space-y-3 md:space-y-4">
-            <p className="text-gray-600 text-sm md:text-base">
-              Didn't receive the email? Check your spam folder.
-            </p>
+            {!isVerified && !pendingApproval && !isProcessingVerification && (
+              <p className="text-gray-600 text-sm md:text-base">
+                Didn't receive the email? Check your spam folder.
+              </p>
+            )}
 
-            {email && (
+            {!isVerified && !pendingApproval && !isProcessingVerification && email && (
               <button
                 onClick={handleResend}
-                disabled={resending}
+                disabled={resending || resendCooldown > 0}
                 className="w-full bg-violet-600 text-white py-2.5 md:py-3 px-4 md:px-6 rounded-lg font-semibold hover:bg-violet-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {resending ? "Sending..." : "Resend Verification Email"}
+                {resending
+                  ? "Sending..."
+                  : resendCooldown > 0
+                  ? `Resend available in ${resendCooldown}s`
+                  : "Resend Verification Email"}
               </button>
             )}
 
             {resendMessage && (
               <div
                 className={`p-3 rounded-lg ${
-                  resendMessage.includes("sent")
+                  isVerified || resendMessage.toLowerCase().includes("sent")
                     ? "bg-green-50 text-green-700 border border-green-200"
                     : "bg-red-50 text-red-700 border border-red-200"
                 }`}
@@ -220,18 +314,22 @@ const VerifyEmailPage = () => {
             )}
 
             <div className="flex flex-col gap-2 pt-2 md:pt-4">
-              <Link
-                to="/signup"
-                className="text-violet-600 hover:text-violet-800 font-semibold"
-              >
-                Try using a different email address
-              </Link>
-              <Link
-                to="/login"
-                className="text-violet-600 hover:text-violet-800 font-semibold"
-              >
-                Return to login
-              </Link>
+              {!isVerified && !pendingApproval && (
+                <Link
+                  to="/signup"
+                  className="text-violet-600 hover:text-violet-800 font-semibold"
+                >
+                  Try using a different email address
+                </Link>
+              )}
+              {!isVerified && !pendingApproval && (
+                <Link
+                  to="/login"
+                  className="text-violet-600 hover:text-violet-800 font-semibold"
+                >
+                  Return to login
+                </Link>
+              )}
             </div>
           </div>
 

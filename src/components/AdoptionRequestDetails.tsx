@@ -48,12 +48,14 @@ const createAdoptionChat = async ({
   ownerId,
   postId,
   adopterName,
+  ownerName,
   petName,
 }: {
   adopterId: string;
   ownerId: string;
   postId: number;
   adopterName: string;
+  ownerName?: string;
   petName?: string;
 }) => {
   const { data: existing, error: existingError } = await supabase
@@ -63,24 +65,25 @@ const createAdoptionChat = async ({
       specific_post_id: postId,
     });
   if (!existingError && existing && existing.length > 0) return existing[0].conversation_id;
-  const { data, error } = await supabase
+  
+  // Generate UUID client-side to avoid SELECT RLS issue after INSERT
+  const conversationId = crypto.randomUUID();
+  const { error } = await supabase
     .from("conversations")
     .insert([
       {
+        id: conversationId,
         title: adopterName,
         post_id: postId,
         adopter_name: adopterName,
-        owner_name: "",
+        owner_name: ownerName || "",
         pet_name: petName,
         is_group: false,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       },
-    ])
-    .select()
-    .single();
+    ]);
   if (error) throw error;
-  const conversationId = data.id;
   await supabase.from("user_conversations").insert([
     { user_id: adopterId, conversation_id: conversationId, joined_at: new Date().toISOString() },
     { user_id: ownerId, conversation_id: conversationId, joined_at: new Date().toISOString() },
@@ -240,12 +243,60 @@ export const AdoptionRequestDetails: React.FC<AdoptionRequestDetailsProps> = ({
           .eq("id", request?.post_id);
         if (postError) throw postError;
 
-        // Create chat between adopter and owner
+        // Get owner (current user) name - try profiles, users table, then RPC
+        let currentOwnerName = "";
+        try {
+          const { data: profile } = await supabase
+            .from("profiles").select("full_name").eq("id", user.id).maybeSingle();
+          if (profile?.full_name && profile.full_name !== "Unknown") {
+            currentOwnerName = profile.full_name;
+          } else {
+            const { data: userData } = await supabase
+              .from("users").select("full_name").eq("user_id", user.id).maybeSingle();
+            if (userData?.full_name && userData.full_name !== "Unknown") {
+              currentOwnerName = userData.full_name;
+            } else {
+              try {
+                const { data: nameData } = await supabase.rpc("get_user_display_name", {
+                  target_user_id: user.id,
+                });
+                if (nameData) currentOwnerName = nameData;
+              } catch { /* RPC may not exist */ }
+            }
+          }
+        } catch { /* ignore */ }
+
+        // Get adopter name - try provided name, profiles, users table, then RPC
+        let adopterDisplayName = requester?.full_name || "";
+        if (!adopterDisplayName || adopterDisplayName === "User" || adopterDisplayName === "Name not provided" || adopterDisplayName === "Unknown") {
+          try {
+            const { data: profile } = await supabase
+              .from("profiles").select("full_name").eq("id", request.requester_id).maybeSingle();
+            if (profile?.full_name && profile.full_name !== "Unknown") {
+              adopterDisplayName = profile.full_name;
+            } else {
+              const { data: userData } = await supabase
+                .from("users").select("full_name").eq("user_id", request.requester_id).maybeSingle();
+              if (userData?.full_name && userData.full_name !== "Unknown") {
+                adopterDisplayName = userData.full_name;
+              } else {
+                try {
+                  const { data: nameData } = await supabase.rpc("get_user_display_name", {
+                    target_user_id: request.requester_id,
+                  });
+                  if (nameData) adopterDisplayName = nameData;
+                } catch { /* RPC may not exist */ }
+              }
+            }
+          } catch { /* ignore */ }
+        }
+
         const conversationId = await createAdoptionChat({
           adopterId: request.requester_id,
           ownerId: request.owner_id,
           postId: request.post_id,
-          adopterName: requester?.full_name || "Unknown",
+          adopterName: adopterDisplayName || "User",
+          ownerName: currentOwnerName,
           petName: request.post?.name,
         });
         toast.success("Adoption approved! Redirecting to chat...");

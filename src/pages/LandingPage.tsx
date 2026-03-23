@@ -10,6 +10,7 @@ import {
 } from "react-icons/fa";
 import { useAuth } from "../context/AuthContext";
 import { PWAInstallButton } from "../components/PWAInstallButton";
+import { supabase } from "../supabase-client";
 
 const LandingPage = () => {
   const navigate = useNavigate();
@@ -23,9 +24,53 @@ const LandingPage = () => {
   const [menuOpen, setMenuOpen] = useState(false);
 
   useEffect(() => {
-    if (user) {
-      navigate("/home");
-    }
+    const redirectAuthenticatedUser = async () => {
+      if (!user) return;
+
+      const { data: userData } = await supabase
+        .from("users")
+        .select("role, verified")
+        .eq("user_id", user.id)
+        .maybeSingle();
+
+      if (!userData) {
+        navigate("/verify-email", {
+          state: {
+            pendingApproval: true,
+            message:
+              "Thankyou for registering, please wait for the verification so you can log in.",
+          },
+          replace: true,
+        });
+        return;
+      }
+
+      if (userData.role === "admin") {
+        navigate("/admin-dashboard", { replace: true });
+        return;
+      }
+
+      if (userData.role === "vet") {
+        navigate("/vet-dashboard", { replace: true });
+        return;
+      }
+
+      if (userData.role === "user" && userData.verified !== true) {
+        navigate("/verify-email", {
+          state: {
+            pendingApproval: true,
+            message:
+              "Thankyou for registering, please wait for the verification so you can log in.",
+          },
+          replace: true,
+        });
+        return;
+      }
+
+      navigate("/home", { replace: true });
+    };
+
+    redirectAuthenticatedUser();
 
     // Add scroll animation observer
     const observer = new IntersectionObserver(

@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { supabase } from "../supabase-client";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { FaPaw, FaArrowRight } from "react-icons/fa";
 import { MdPets } from "react-icons/md";
 
@@ -38,6 +38,7 @@ interface PostListProps {
 }
 
 export const PostList: React.FC<PostListProps> = ({ posts: initialPosts }) => {
+  const navigate = useNavigate();
   const [posts, setPosts] = useState<Post[]>(initialPosts || []);
   const [loading, setLoading] = useState(!initialPosts);
 
@@ -264,7 +265,14 @@ export const PostList: React.FC<PostListProps> = ({ posts: initialPosts }) => {
                         {(post.owner_first_name || post.owner_name) && (
                           <p className="text-sm text-violet-600 font-['Poppins'] flex items-center truncate">
                             <span className="text-xs text-gray-500">Posted by</span>
-                            <span className="ml-2 font-medium text-violet-700">
+                            <span
+                              className="ml-2 font-medium text-violet-700 hover:text-violet-900 hover:underline cursor-pointer"
+                              onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                navigate(`/user/${(post as any).user_id || (post as any).auth_users_id}`);
+                              }}
+                            >
                               {post.owner_first_name
                                 ? `${post.owner_first_name}${post.owner_last_name ? ' ' + post.owner_last_name : ''}`
                                 : post.owner_name}

@@ -1,4 +1,4 @@
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { Post } from "./PostList";
 import {
   FaPaw,
@@ -15,6 +15,7 @@ interface Props {
 }
 
 export const PostItem = ({ post }: Props) => {
+  const navigate = useNavigate();
   
 
   // Function to extract vaccination proof URL from health_info
@@ -68,7 +69,14 @@ export const PostItem = ({ post }: Props) => {
                   {post.owner_first_name || post.owner_name ? (
                     <>
                       <span className="text-xs text-gray-500">Posted by</span>
-                      <span className="ml-2 font-medium text-violet-700">
+                      <span
+                        className="ml-2 font-medium text-violet-700 hover:text-violet-900 hover:underline cursor-pointer"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          navigate(`/user/${post.user_id || post.auth_users_id}`);
+                        }}
+                      >
                         {post.owner_first_name
                           ? `${post.owner_first_name}${post.owner_last_name ? ' ' + post.owner_last_name : ''}`
                           : post.owner_name}

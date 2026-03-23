@@ -1,4 +1,5 @@
-import { Route, Routes, useLocation } from "react-router-dom";
+import { Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { useEffect } from "react";
 import Navbar from "./components/Navbar";
 import { UserProfile } from "./components/UserProfile";
 import { Messages } from "./components/Messages";
@@ -22,17 +23,95 @@ import VerifyEmailPage from "./pages/VerifyEmailPage";
 import VetDashboard from "./pages/VetDashboard";
 import AdminDashboard from "./pages/AdminDashboard";
 import Home from "./pages/Home";
+import { useAuth } from "./context/AuthContext";
+import { supabase } from "./supabase-client";
 
 const PetProfileWrapper = () => {
   const { id } = useParams<{ id: string }>();
   return <PetProfile petId={Number(id)} />;
 };
 
+const PublicProfileWrapper = () => {
+  const { id } = useParams<{ id: string }>();
+  return <UserProfile profileId={id} />;
+};
+
 function App() {
+  const { user } = useAuth();
   const location = useLocation();
+  const navigate = useNavigate();
   const isPostPage = location.pathname.startsWith("/post/");
   const isCreatePage = location.pathname === "/create";
   const isChatPage = location.pathname.startsWith("/chat");
+
+  useEffect(() => {
+    // Force Supabase auth callback links to the verify page so users don't
+    // land on app routes like /home with a temporary session.
+    const hashParams = new URLSearchParams(window.location.hash.substring(1));
+    const queryParams = new URLSearchParams(window.location.search);
+
+    const hasHashAuthToken = !!hashParams.get("access_token");
+    const hasQueryOtpToken = !!queryParams.get("token_hash");
+    const callbackType = hashParams.get("type") || queryParams.get("type");
+    const isSignupLikeCallback =
+      ["signup", "magiclink", "invite", "email"].includes(callbackType || "") ||
+      // Fallback: some links omit the type but still carry a token hash/access token.
+      (!callbackType && (hasHashAuthToken || hasQueryOtpToken));
+
+    if ((hasHashAuthToken || hasQueryOtpToken) && isSignupLikeCallback && location.pathname !== "/verify-email") {
+      navigate(`/verify-email${window.location.search}${window.location.hash}`, {
+        replace: true,
+      });
+    }
+  }, [location.pathname, navigate]);
+
+  useEffect(() => {
+    const enforcePendingApprovalGate = async () => {
+      if (!user) return;
+
+      // Allow email verification callback page to process token before enforcing gates.
+      if (location.pathname === "/verify-email") return;
+
+      const { data: userRow, error } = await supabase
+        .from("users")
+        .select("role, verified")
+        .eq("user_id", user.id)
+        .maybeSingle();
+
+      // If we cannot find the profile row for a regular user, treat them as pending.
+      if (error || !userRow) {
+        const metaRole = user.user_metadata?.role || "user";
+        if (metaRole === "user") {
+          await supabase.auth.signOut();
+          localStorage.removeItem("userRole");
+          navigate("/verify-email", {
+            state: {
+              pendingApproval: true,
+              message:
+                "Thankyou for registering, please wait for the verification so you can log in.",
+            },
+            replace: true,
+          });
+        }
+        return;
+      }
+
+      if (userRow.role === "user" && userRow.verified !== true) {
+        await supabase.auth.signOut();
+        localStorage.removeItem("userRole");
+        navigate("/verify-email", {
+          state: {
+            pendingApproval: true,
+            message:
+              "Thankyou for registering, please wait for the verification so you can log in.",
+          },
+          replace: true,
+        });
+      }
+    };
+
+    enforcePendingApprovalGate();
+  }, [user, location.pathname, navigate]);
 
   const contentWrapperClass = isChatPage
     ? "h-full"
@@ -100,6 +179,7 @@ function App() {
                     <Route path="home" element={<Home />} />
                     <Route path="search" element={<PetSearch />} />
                     <Route path="profile" element={<UserProfile />} />
+                    <Route path="user/:id" element={<PublicProfileWrapper />} />
                     <Route path="messages" element={<Messages />} />
                     <Route path="create" element={<CreatePostPage />} />
                     <Route path="pet/:id" element={<PetProfileWrapper />} />

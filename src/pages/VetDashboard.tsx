@@ -198,6 +198,7 @@ export default function VetDashboard() {
   const [showDeclineModal, setShowDeclineModal] = useState(false);
   const [userToDecline, setUserToDecline] = useState<User | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const recentlyProcessedUsersRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     if (role !== "vet") return;
@@ -237,7 +238,7 @@ export default function VetDashboard() {
         .select("*")
         .eq("role", "user")
         .eq("verified", false)
-        .eq("declined", false)
+        .or("declined.is.null,declined.eq.false")
         .order("created_at", { ascending: false });
 
       if (usersError) {
@@ -265,7 +266,9 @@ export default function VetDashboard() {
       );
 
       // Combine user data with profile data
-      const combinedUsers = usersData.map((user) => {
+      const combinedUsers = usersData
+        .filter((user) => !recentlyProcessedUsersRef.current.has(user.user_id))
+        .map((user) => {
         const profile = profileMap.get(user.user_id);
         return {
           ...user,
@@ -292,16 +295,27 @@ export default function VetDashboard() {
   const handleDeclineUser = async (reason: string) => {
     if (!userToDecline) return;
 
+    const declineReason = reason.trim() || "No specific reason was provided.";
+
     try {
-      const { error } = await supabase
-        .from("users")
-        .update({ declined: true, declined_reason: reason || null })
-        .eq("user_id", userToDecline.user_id);
+      const { error } = await supabase.functions.invoke("vet-decline-user", {
+        body: {
+          targetUserId: userToDecline.user_id,
+          reason: declineReason,
+        },
+      });
 
       if (error) throw error;
 
-      toast.success("User declined and removed from pending approvals.");
-      fetchPendingUsers();
+      recentlyProcessedUsersRef.current.add(userToDecline.user_id);
+
+      toast.success("User declined successfully.");
+      setPendingUsers((prev) =>
+        prev.filter((pendingUser) => pendingUser.user_id !== userToDecline.user_id)
+      );
+      setTimeout(() => {
+        fetchPendingUsers();
+      }, 1200);
       setShowDeclineModal(false);
       setUserToDecline(null);
     } catch (error) {
@@ -331,13 +345,20 @@ export default function VetDashboard() {
     try {
       const { error } = await supabase
         .from("users")
-        .update({ verified: true })
+        .update({ verified: true, declined: false, declined_reason: null })
         .eq("user_id", userId);
 
       if (error) throw error;
 
+      recentlyProcessedUsersRef.current.add(userId);
+
       toast.success("User verified successfully!");
-      fetchPendingUsers();
+      setPendingUsers((prev) =>
+        prev.filter((pendingUser) => pendingUser.user_id !== userId)
+      );
+      setTimeout(() => {
+        fetchPendingUsers();
+      }, 1200);
     } catch (error) {
       console.error("Error verifying user:", error);
       toast.error("Failed to verify user");

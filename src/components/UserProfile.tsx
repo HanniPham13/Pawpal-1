@@ -15,12 +15,14 @@ import {
   FaEye,
   FaDownload,
   FaFileImage,
+  FaCamera,
 } from "react-icons/fa";
 import { useState, useEffect, useRef } from "react";
 import { Link } from "react-router-dom";
 
 interface UserData {
   id: string;
+  full_name?: string;
   bio: string;
   location: string;
   is_shelter: boolean;
@@ -83,25 +85,26 @@ const fetchUserPosts = async (userId: string): Promise<Post[]> => {
   // For each post, get adoption request counts
   if (data && data.length > 0) {
     for (const post of data) {
-      // Get adoption request count
-      const { count: requestCount, error: requestError } = await supabase
-        .from("adoption_requests")
-        .select("*", { count: "exact", head: true })
-        .eq("post_id", post.id);
+      try {
+        // Get adoption request count
+        const { count: requestCount } = await supabase
+          .from("adoption_requests")
+          .select("*", { count: "exact", head: true })
+          .eq("post_id", post.id);
 
-      if (!requestError) {
         post.request_count = requestCount || 0;
-      }
 
-      // Get approved adoption count
-      const { count: adoptionCount, error: adoptionError } = await supabase
-        .from("adoption_requests")
-        .select("*", { count: "exact", head: true })
-        .eq("post_id", post.id)
-        .eq("status", "approved");
+        // Get approved adoption count
+        const { count: adoptionCount } = await supabase
+          .from("adoption_requests")
+          .select("*", { count: "exact", head: true })
+          .eq("post_id", post.id)
+          .eq("status", "approved");
 
-      if (!adoptionError) {
         post.adoption_count = adoptionCount || 0;
+      } catch {
+        post.request_count = 0;
+        post.adoption_count = 0;
       }
     }
   }
@@ -113,10 +116,14 @@ const fetchUserPosts = async (userId: string): Promise<Post[]> => {
 const calculateUserStats = (posts: Post[]): UserStats => {
   const total_posts = posts.length;
   const available_pets = posts.filter(
-    (post) => post.status === "Available"
+    (post) => post.status?.toLowerCase() === "available" || post.status?.toLowerCase() === "approved"
   ).length;
-  const adopted_pets = posts.filter((post) => post.status === "Adopted").length;
-  const pending_pets = posts.filter((post) => post.status === "Pending").length;
+  const adopted_pets = posts.filter(
+    (post) => post.status?.toLowerCase() === "adopted"
+  ).length;
+  const pending_pets = posts.filter(
+    (post) => post.status?.toLowerCase() === "pending"
+  ).length;
 
   // Calculate adoption rate (approved adoptions / total posts with requests)
   const postsWithRequests = posts.filter(
@@ -312,8 +319,10 @@ export const UserProfile = ({ profileId }: UserProfileProps) => {
   const [saving, setSaving] = useState(false);
   const [profileError, setProfileError] = useState("");
 
-  // File input reference
+  // File input references
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const avatarInputRef = useRef<HTMLInputElement>(null);
+  const [isUploadingAvatar, setIsUploadingAvatar] = useState(false);
 
   // Determine which user profile to show - current user or requested profile
   const targetUserId = profileId || user?.id || "";
@@ -347,6 +356,56 @@ export const UserProfile = ({ profileId }: UserProfileProps) => {
       setNewBio(userData.bio || "");
     }
   }, [userData]);
+
+  // Handle avatar upload
+  const handleAvatarUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !user || !isOwnProfile) return;
+
+    if (!file.type.startsWith('image/')) {
+      setUploadMessage("Please select an image file");
+      setTimeout(() => setUploadMessage(""), 3000);
+      return;
+    }
+
+    setIsUploadingAvatar(true);
+    try {
+      // Use post-images bucket which has working RLS policies
+      const filePath = `avatar-${user.id}-${Date.now()}-${file.name.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
+      const { error: uploadError } = await supabase.storage
+        .from("post-images")
+        .upload(filePath, file);
+
+      if (uploadError) throw uploadError;
+
+      const { data: urlData } = supabase.storage.from("post-images").getPublicUrl(filePath);
+      const avatarUrl = urlData.publicUrl;
+
+      // Update users table so avatar persists across refreshes
+      const { error: dbError } = await supabase
+        .from("users")
+        .update({ avatar_url: avatarUrl })
+        .eq("user_id", user.id);
+
+      if (dbError) {
+        console.error("Error updating users table:", dbError);
+      }
+
+      // Update auth metadata as backup
+      await supabase.auth.updateUser({ data: { avatar_url: avatarUrl } });
+
+      refetchUser();
+      setUploadMessage("Profile picture updated!");
+      setTimeout(() => setUploadMessage(""), 3000);
+    } catch (error) {
+      console.error("Error uploading avatar:", error);
+      setUploadMessage("Failed to upload profile picture");
+      setTimeout(() => setUploadMessage(""), 5000);
+    } finally {
+      setIsUploadingAvatar(false);
+      if (avatarInputRef.current) avatarInputRef.current.value = "";
+    }
+  };
 
   // Function to update bio
   const updateBio = async () => {
@@ -742,7 +801,10 @@ export const UserProfile = ({ profileId }: UserProfileProps) => {
             <div className="flex flex-col sm:flex-row items-center sm:items-start gap-6 sm:gap-8">
               {/* Avatar Section */}
               <div className="relative">
-                <div className="w-24 h-24 sm:w-32 sm:h-32 rounded-full bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500 flex items-center justify-center shadow-2xl border-4 border-white">
+                <div
+                  className={`w-24 h-24 sm:w-32 sm:h-32 rounded-full bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500 flex items-center justify-center shadow-2xl border-4 border-white overflow-hidden ${isOwnProfile ? 'cursor-pointer group/avatar' : ''}`}
+                  onClick={() => isOwnProfile && avatarInputRef.current?.click()}
+                >
                   {userData?.avatar_url ? (
                     <img
                       src={userData.avatar_url}
@@ -758,7 +820,23 @@ export const UserProfile = ({ profileId }: UserProfileProps) => {
                   ) : (
                     <FaUser className="text-4xl sm:text-5xl text-white" />
                   )}
+                  {isOwnProfile && (
+                    <div className="absolute inset-0 rounded-full bg-black/40 opacity-0 group-hover/avatar:opacity-100 transition-opacity flex items-center justify-center">
+                      {isUploadingAvatar ? (
+                        <div className="animate-spin rounded-full h-6 w-6 border-2 border-white border-t-transparent"></div>
+                      ) : (
+                        <FaCamera className="text-white text-xl" />
+                      )}
+                    </div>
+                  )}
                 </div>
+                <input
+                  ref={avatarInputRef}
+                  type="file"
+                  className="hidden"
+                  accept="image/*"
+                  onChange={handleAvatarUpload}
+                />
                 {userData?.verified && (
                   <div className="absolute -bottom-2 -right-2 bg-emerald-500 text-white rounded-full p-2 shadow-lg border-2 border-white">
                     <FaShieldAlt className="w-4 h-4" />
@@ -772,7 +850,7 @@ export const UserProfile = ({ profileId }: UserProfileProps) => {
                   <h1 className="text-2xl sm:text-3xl lg:text-4xl font-bold text-slate-800">
                     {isOwnProfile
                       ? user?.user_metadata?.full_name || user?.email
-                      : user?.user_metadata?.full_name || user?.email || "User"}
+                      : userData?.full_name || "User"}
                   </h1>
                   {isOwnProfile && (
                     <button
@@ -869,32 +947,28 @@ export const UserProfile = ({ profileId }: UserProfileProps) => {
                 <FaUser className="inline mr-2" />
                 Profile
               </button>
-              {isOwnProfile && (
-                <>
-                  <button
-                    onClick={() => setActiveTab("posts")}
-                    className={`px-6 py-3 rounded-xl font-semibold transition-all duration-200 text-sm sm:text-base ${
-                      activeTab === "posts"
-                        ? "bg-gradient-to-r from-indigo-500 to-purple-500 text-white shadow-lg"
-                        : "text-slate-600 hover:text-slate-800 hover:bg-slate-100"
-                    }`}
-                  >
-                    <FaPaw className="inline mr-2" />
-                    Posts
-                  </button>
-                  <button
-                    onClick={() => setActiveTab("analytics")}
-                    className={`px-6 py-3 rounded-xl font-semibold transition-all duration-200 text-sm sm:text-base ${
-                      activeTab === "analytics"
-                        ? "bg-gradient-to-r from-indigo-500 to-purple-500 text-white shadow-lg"
-                        : "text-slate-600 hover:text-slate-800 hover:bg-slate-100"
-                    }`}
-                  >
-                    <FaChartPie className="inline mr-2" />
-                    Analytics
-                  </button>
-                </>
-              )}
+              <button
+                onClick={() => setActiveTab("posts")}
+                className={`px-6 py-3 rounded-xl font-semibold transition-all duration-200 text-sm sm:text-base ${
+                  activeTab === "posts"
+                    ? "bg-gradient-to-r from-indigo-500 to-purple-500 text-white shadow-lg"
+                    : "text-slate-600 hover:text-slate-800 hover:bg-slate-100"
+                }`}
+              >
+                <FaPaw className="inline mr-2" />
+                Posts
+              </button>
+              <button
+                onClick={() => setActiveTab("analytics")}
+                className={`px-6 py-3 rounded-xl font-semibold transition-all duration-200 text-sm sm:text-base ${
+                  activeTab === "analytics"
+                    ? "bg-gradient-to-r from-indigo-500 to-purple-500 text-white shadow-lg"
+                    : "text-slate-600 hover:text-slate-800 hover:bg-slate-100"
+                }`}
+              >
+                <FaChartPie className="inline mr-2" />
+                Analytics
+              </button>
             </div>
           </div>
         </div>
@@ -1110,15 +1184,17 @@ export const UserProfile = ({ profileId }: UserProfileProps) => {
                   <div className="p-2 bg-gradient-to-r from-purple-500 to-pink-500 rounded-xl">
                     <FaPaw className="text-white w-5 h-5" />
                   </div>
-                  Your Pet Listings
+                  {isOwnProfile ? "Your Pet Listings" : "Pet Listings"}
                 </h2>
-                <Link
-                  to="/create"
-                  className="px-6 py-3 bg-gradient-to-r from-purple-500 to-pink-500 text-white rounded-xl font-semibold hover:from-purple-600 hover:to-pink-600 transition-all shadow-lg flex items-center gap-2"
-                >
-                  <FaPlusCircle className="w-4 h-4" />
-                  New Post
-                </Link>
+                {isOwnProfile && (
+                  <Link
+                    to="/create"
+                    className="px-6 py-3 bg-gradient-to-r from-purple-500 to-pink-500 text-white rounded-xl font-semibold hover:from-purple-600 hover:to-pink-600 transition-all shadow-lg flex items-center gap-2"
+                  >
+                    <FaPlusCircle className="w-4 h-4" />
+                    New Post
+                  </Link>
+                )}
               </div>
 
               {userPosts && userPosts.length > 0 ? (
@@ -1145,9 +1221,9 @@ export const UserProfile = ({ profileId }: UserProfileProps) => {
                         <div className="absolute top-3 right-3">
                           <span
                             className={`px-3 py-1 rounded-full text-xs font-semibold shadow-lg ${
-                              post.status === "Available"
+                              post.status?.toLowerCase() === "available" || post.status?.toLowerCase() === "approved"
                                 ? "bg-emerald-100 text-emerald-700 border border-emerald-200"
-                                : post.status === "Pending"
+                                : post.status?.toLowerCase() === "pending"
                                 ? "bg-amber-100 text-amber-700 border border-amber-200"
                                 : "bg-blue-100 text-blue-700 border border-blue-200"
                             }`}
@@ -1183,15 +1259,17 @@ export const UserProfile = ({ profileId }: UserProfileProps) => {
                     No pet listings yet
                   </p>
                   <p className="text-slate-500 mb-8">
-                    Start sharing your pets with the community
+                    {isOwnProfile ? "Start sharing your pets with the community" : "No pet listings yet"}
                   </p>
-                  <Link
-                    to="/create"
-                    className="px-8 py-4 bg-gradient-to-r from-purple-500 to-pink-500 text-white rounded-xl font-semibold hover:from-purple-600 hover:to-pink-600 transition-all shadow-lg flex items-center gap-2 mx-auto w-fit"
-                  >
-                    <FaPlusCircle className="w-5 h-5" />
-                    Create Your First Post
-                  </Link>
+                  {isOwnProfile && (
+                    <Link
+                      to="/create"
+                      className="px-8 py-4 bg-gradient-to-r from-purple-500 to-pink-500 text-white rounded-xl font-semibold hover:from-purple-600 hover:to-pink-600 transition-all shadow-lg flex items-center gap-2 mx-auto w-fit"
+                    >
+                      <FaPlusCircle className="w-5 h-5" />
+                      Create Your First Post
+                    </Link>
+                  )}
                 </div>
               )}
             </div>

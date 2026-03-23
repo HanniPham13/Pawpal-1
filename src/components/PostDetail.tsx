@@ -12,7 +12,7 @@ import {
   FaEnvelope,
 } from "react-icons/fa";
 import { MdPets } from "react-icons/md";
-import { useNavigate, useLocation } from "react-router-dom";
+import { useNavigate, useLocation, Link } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { useState, useEffect, useRef, useCallback } from "react";
 import { toast } from "react-hot-toast";
@@ -287,12 +287,14 @@ const createAdoptionChat = async ({
   ownerId,
   postId,
   adopterName,
+  ownerName,
   petName,
 }: {
   adopterId: string;
   ownerId: string;
   postId: number;
   adopterName: string;
+  ownerName?: string;
   petName?: string;
 }) => {
   // Check for existing conversation
@@ -304,25 +306,28 @@ const createAdoptionChat = async ({
     });
   if (!existingError && existing && existing.length > 0) return existing[0].conversation_id;
   
-  // Create new conversation
-  const { data, error } = await supabase
+  // Generate UUID client-side so we don't need SELECT after INSERT
+  // (the SELECT RLS policy on conversations requires the user to be in user_conversations,
+  // but we haven't added them yet — a chicken-and-egg problem)
+  const conversationId = crypto.randomUUID();
+  
+  // Create new conversation without .select() to avoid RLS SELECT policy issue
+  const { error } = await supabase
     .from("conversations")
     .insert([
       {
+        id: conversationId,
         title: adopterName,
         post_id: postId,
         adopter_name: adopterName,
-        owner_name: "",
+        owner_name: ownerName || "",
         pet_name: petName,
         is_group: false,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       },
-    ])
-    .select()
-    .single();
+    ]);
   if (error) throw error;
-  const conversationId = data.id;
   
   // Add both users to conversation
   await supabase.from("user_conversations").insert([
@@ -350,7 +355,7 @@ const sendAdoptionRequest = async (
 
     if (checkError) {
       console.error("Error checking existing requests:", checkError);
-      throw checkError;
+      throw new Error(checkError.message || "Failed to check existing requests");
     }
 
     if (existingRequests && existingRequests.length > 0) {
@@ -358,64 +363,101 @@ const sendAdoptionRequest = async (
     }
 
     // If no existing request, create a new one (send minimal required fields)
+    const insertData: Record<string, unknown> = {
+      post_id: postId,
+      requester_id: requesterId,
+      owner_id: ownerId,
+      status: "pending",
+    };
+    if (reason) {
+      insertData.adoption_reason = reason;
+    }
+
     const { data, error } = await supabase
       .from("adoption_requests")
-      .insert([
-        {
-          post_id: postId,
-          requester_id: requesterId,
-          owner_id: ownerId,
-          status: "pending",
-          adoption_reason: reason ?? "",
-        },
-      ])
+      .insert([insertData])
       .select("*");
 
     if (error) {
       console.error("Error creating adoption request:", error);
-      throw error;
+      throw new Error(error.message || "Failed to create adoption request");
     }
 
     // Also create a notification for the pet owner
-    const { error: notificationError } = await supabase
-      .from("notifications")
-      .insert([
-        {
+    try {
+      await supabase
+        .from("notifications")
+        .insert([{
           user_id: ownerId,
           type: "adoption_request",
           message: `New adoption request for ${petName}${reason ? ` - Reason: ${reason}` : ""}`,
           created_at: new Date().toISOString(),
-          read: false,
+          is_read: false,
           link: `/post/${postId}`,
           post_id: postId,
-        },
-      ]);
-
-    if (notificationError) {
-      console.error("Error creating notification:", notificationError);
-      // Don't throw here, we still want to consider the adoption request as successful
-      // Just log the error for debugging
+        }]);
+    } catch (notifErr) {
+      console.error("Error creating notification:", notifErr);
     }
 
     // Create chat immediately after submitting adoption request
     try {
-      // Get requester name for chat
-      const { data: requesterProfile } = await supabase
-        .from("profiles")
-        .select("full_name")
-        .eq("id", requesterId)
-        .single();
-      
-      const requesterName = requesterProfile?.full_name || "User";
+      // Get adopter name - try profiles, users table, then RPC
+      let requesterName = "User";
+      try {
+        const { data: profile } = await supabase
+          .from("profiles").select("full_name").eq("id", requesterId).maybeSingle();
+        if (profile?.full_name && profile.full_name !== "Unknown") {
+          requesterName = profile.full_name;
+        } else {
+          const { data: userData } = await supabase
+            .from("users").select("full_name").eq("user_id", requesterId).maybeSingle();
+          if (userData?.full_name && userData.full_name !== "Unknown") {
+            requesterName = userData.full_name;
+          } else {
+            try {
+              const { data: nameData } = await supabase.rpc("get_user_display_name", {
+                target_user_id: requesterId,
+              });
+              if (nameData) requesterName = nameData;
+            } catch { /* RPC may not exist */ }
+          }
+        }
+      } catch { /* ignore */ }
+
+      // Get owner name - try profiles, users table, then RPC
+      let ownerDisplayName = "";
+      try {
+        const { data: profile } = await supabase
+          .from("profiles").select("full_name").eq("id", ownerId).maybeSingle();
+        if (profile?.full_name && profile.full_name !== "Unknown") {
+          ownerDisplayName = profile.full_name;
+        } else {
+          const { data: userData } = await supabase
+            .from("users").select("full_name").eq("user_id", ownerId).maybeSingle();
+          if (userData?.full_name && userData.full_name !== "Unknown") {
+            ownerDisplayName = userData.full_name;
+          } else {
+            try {
+              const { data: nameData } = await supabase.rpc("get_user_display_name", {
+                target_user_id: ownerId,
+              });
+              if (nameData) ownerDisplayName = nameData;
+            } catch { /* RPC may not exist */ }
+          }
+        }
+      } catch { /* ignore */ }
+
       const conversationId = await createAdoptionChat({
         adopterId: requesterId,
         ownerId: ownerId,
         postId: postId,
         adopterName: requesterName,
+        ownerName: ownerDisplayName,
         petName: petName,
       });
       
-      return { ...data, conversationId };
+      return { conversationId };
     } catch (chatError) {
       console.error("Error creating chat:", chatError);
       // Don't throw - adoption request was successful, chat creation is optional
@@ -440,7 +482,7 @@ const cancelAdoptionRequest = async (postId: number, requesterId: string) => {
 
     if (findError) {
       console.error("Error finding adoption request to cancel:", findError);
-      throw findError;
+      throw new Error(findError.message || "Failed to find adoption request");
     }
 
     if (!existingRequests || existingRequests.length === 0) {
@@ -456,29 +498,23 @@ const cancelAdoptionRequest = async (postId: number, requesterId: string) => {
 
     if (deleteError) {
       console.error("Error canceling adoption request:", deleteError);
-      throw deleteError;
+      throw new Error(deleteError.message || "Failed to cancel adoption request");
     }
 
     // Create a notification for the owner
-    const { error: notificationError } = await supabase
-      .from("notifications")
-      .insert([
-        {
+    try {
+      await supabase
+        .from("notifications")
+        .insert([{
           user_id: existingRequests[0].owner_id,
           type: "adoption_cancelled",
           message: `An adoption request for your pet has been cancelled`,
           created_at: new Date().toISOString(),
-          read: false,
+          is_read: false,
           link: `/post/${postId}`,
-        },
-      ]);
-
-    if (notificationError) {
-      console.error(
-        "Error creating cancellation notification:",
-        notificationError
-      );
-      // Don't throw here, we still want to consider the cancellation as successful
+        }]);
+    } catch (notifErr) {
+      console.error("Error creating cancellation notification:", notifErr);
     }
 
     return true;
@@ -705,7 +741,7 @@ export const PostDetail = ({ postId }: { postId: string }) => {
     return <div>Error loading post.</div>;
   }
 
-  const isOwner = user && user.id === post.user_id;
+  const isOwner = user && (user.id === post.user_id || user.id === post.auth_users_id);
 
   const handleDelete = async () => {
     if (!post) return;
@@ -752,7 +788,11 @@ export const PostDetail = ({ postId }: { postId: string }) => {
       checkExistingRequest(); // Re-check status after cancelling
     } catch (error: unknown) {
       const message =
-        error instanceof Error ? error.message : "Failed to cancel request.";
+        error instanceof Error
+          ? error.message
+          : typeof error === "object" && error !== null && "message" in error
+            ? String((error as { message: unknown }).message)
+            : "Failed to cancel request.";
       toast.error(message);
     } finally {
       setIsRequesting(false);
@@ -797,7 +837,8 @@ export const PostDetail = ({ postId }: { postId: string }) => {
         onClose={() => setIsAdoptionReasonModalOpen(false)}
         isSubmitting={isRequesting}
         onSubmit={async (reason: string) => {
-          if (!user || !post?.user_id || !post?.name) {
+          const ownerId = post?.user_id || post?.auth_users_id;
+          if (!user || !ownerId || !post?.name) {
             toast.error(
               "You must be logged in to make an adoption request, or post data is incomplete."
             );
@@ -805,7 +846,7 @@ export const PostDetail = ({ postId }: { postId: string }) => {
           }
           setIsRequesting(true);
           try {
-            const result = await sendAdoptionRequest(post.id, user.id, post.user_id, post.name, reason);
+            const result = await sendAdoptionRequest(post.id, user.id, ownerId, post.name, reason);
             toast.success("Adoption request sent! Redirecting to chat...");
             setIsAdoptionReasonModalOpen(false);
             checkExistingRequest();
@@ -817,21 +858,29 @@ export const PostDetail = ({ postId }: { postId: string }) => {
               }, 1000);
             } else {
               // Fallback: try to find existing conversation
-              const { data: existingConv } = await supabase
-                .rpc('find_shared_conversation', {
-                  user_id_1: post.user_id,
-                  user_id_2: user.id,
-                  specific_post_id: post.id,
-                });
-              if (existingConv && existingConv.length > 0) {
-                setTimeout(() => {
-                  navigate(`/chat/${existingConv[0].conversation_id}`);
-                }, 1000);
+              try {
+                const { data: existingConv } = await supabase
+                  .rpc('find_shared_conversation', {
+                    user_id_1: ownerId,
+                    user_id_2: user.id,
+                    specific_post_id: post.id,
+                  });
+                if (existingConv && existingConv.length > 0) {
+                  setTimeout(() => {
+                    navigate(`/chat/${existingConv[0].conversation_id}`);
+                  }, 1000);
+                }
+              } catch {
+                // Chat navigation is optional
               }
             }
           } catch (error: unknown) {
             const message =
-              error instanceof Error ? error.message : "Failed to send adoption request.";
+              error instanceof Error
+                ? error.message
+                : typeof error === "object" && error !== null && "message" in error
+                  ? String((error as { message: unknown }).message)
+                  : "Failed to send adoption request.";
             toast.error(message);
           } finally {
             setIsRequesting(false);
@@ -1004,9 +1053,12 @@ export const PostDetail = ({ postId }: { postId: string }) => {
                   {(ownerFirstName || ownerFullName) && (
                     <div className="text-sm text-violet-600 font-['Poppins'] mb-3">
                       <span className="text-xs text-gray-500">Posted by</span>
-                      <span className="ml-2 font-medium text-violet-700">
+                      <Link
+                        to={`/user/${post.user_id}`}
+                        className="ml-2 font-medium text-violet-700 hover:text-violet-900 hover:underline"
+                      >
                         {ownerFirstName ? `${ownerFirstName}${ownerLastName ? ' ' + ownerLastName : ''}` : ownerFullName}
-                      </span>
+                      </Link>
                     </div>
                   )}
                   <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4 text-gray-500 mb-4 sm:mb-6">

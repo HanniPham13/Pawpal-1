@@ -9,6 +9,8 @@ import {
 import { useEffect, useState, useCallback } from "react";
 import { supabase } from "../supabase-client";
 import { Post } from "../components/PostList";
+import { useAuth } from "../context/AuthContext";
+import { useNavigate } from "react-router-dom";
 
 const BREEDS_MAP: Record<string, string[]> = {
   Dog: [
@@ -32,6 +34,8 @@ const BREEDS_MAP: Record<string, string[]> = {
 };
 
 const Home = () => {
+  const { user } = useAuth();
+  const navigate = useNavigate();
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [filters, setFilters] = useState({
     petType: "",
@@ -44,6 +48,50 @@ const Home = () => {
   });
   const [posts, setPosts] = useState<Post[]>([]);
   const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const enforceVerifiedUser = async () => {
+      if (!user) return;
+
+      const { data: userRow } = await supabase
+        .from("users")
+        .select("role, verified")
+        .eq("user_id", user.id)
+        .maybeSingle();
+
+      // Treat missing profile rows for regular users as pending until vet/admin approves.
+      const metaRole = user.user_metadata?.role || "user";
+
+      if (!userRow && metaRole === "user") {
+        await supabase.auth.signOut();
+        localStorage.removeItem("userRole");
+        navigate("/verify-email", {
+          replace: true,
+          state: {
+            pendingApproval: true,
+            message:
+              "Thankyou for registering, please wait for the verification so you can log in.",
+          },
+        });
+        return;
+      }
+
+      if (userRow && userRow.role === "user" && userRow.verified !== true) {
+        await supabase.auth.signOut();
+        localStorage.removeItem("userRole");
+        navigate("/verify-email", {
+          replace: true,
+          state: {
+            pendingApproval: true,
+            message:
+              "Thankyou for registering, please wait for the verification so you can log in.",
+          },
+        });
+      }
+    };
+
+    enforceVerifiedUser();
+  }, [user, navigate]);
 
   const fetchPosts = useCallback(async () => {
     setLoading(true);
