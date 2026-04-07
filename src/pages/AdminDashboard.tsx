@@ -170,42 +170,20 @@ const DashboardHome = () => {
         }
         setUserRole(userData.role);
         fetchStats(userData.role);
-        // Fetch and increment visit count if admin
+        // Fetch current visit count if admin
         if (userData.role === "admin") {
           try {
-            // First get current count
-            const { data: currentData, error: currentError } = await supabase
-              .from("visit_counter")
-              .select("count")
-              .eq("id", true)
-              .single();
-            
-            if (!currentError && currentData) {
-              setVisitCount(currentData.count);
-            }
-            
-            // Then increment
-            const { data: incrementedData, error: incrementError } = await supabase.rpc("increment_visit_count");
-            if (!incrementError && incrementedData !== null) {
-              setVisitCount(incrementedData);
-            } else if (incrementError) {
-              console.error("Error incrementing visit count:", incrementError);
-              // If increment fails, at least show the current count
-              if (currentData) {
-                setVisitCount(currentData.count);
-              }
+            const { data: currentCount, error: currentError } = await supabase.rpc(
+              "get_visit_count"
+            );
+
+            if (!currentError && currentCount !== null && currentCount !== undefined) {
+              setVisitCount(Number(currentCount));
+            } else if (currentError) {
+              console.error("Error fetching visit count:", currentError);
             }
           } catch (error) {
             console.error("Error with visit counter:", error);
-            // Try to get count directly as fallback
-            const { data: fallbackData } = await supabase
-              .from("visit_counter")
-              .select("count")
-              .eq("id", true)
-              .single();
-            if (fallbackData) {
-              setVisitCount(fallbackData.count);
-            }
           }
         }
       } catch (error) {

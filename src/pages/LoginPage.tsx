@@ -3,7 +3,6 @@ import { useNavigate, Link, useLocation } from "react-router-dom";
 import { FaPaw, FaLock, FaEnvelope, FaEye, FaEyeSlash } from "react-icons/fa";
 import { useAuth } from "../context/AuthContext";
 import { LoginErrorModal } from "../components/LoginErrorModal";
-import { supabase } from "../supabase-client";
 
 const LoginPage = () => {
   const navigate = useNavigate();
@@ -18,79 +17,24 @@ const LoginPage = () => {
   const [showErrorModal, setShowErrorModal] = useState(false);
   const [showVerifiedModal, setShowVerifiedModal] = useState(false);
   const [verifiedMessage, setVerifiedMessage] = useState<string | null>(null);
-  const [declineCleanupLoading, setDeclineCleanupLoading] = useState(false);
+  const [showDeclinedThankYou, setShowDeclinedThankYou] = useState(false);
   const [declineAction, setDeclineAction] = useState<"got-it" | "register-again" | null>(null);
-
-  const withTimeout = async <T,>(promise: Promise<T>, ms: number, message: string): Promise<T> =>
-    new Promise<T>((resolve, reject) => {
-      const timer = window.setTimeout(() => reject(new Error(message)), ms);
-      promise
-        .then((value) => {
-          window.clearTimeout(timer);
-          resolve(value);
-        })
-        .catch((timeoutError) => {
-          window.clearTimeout(timer);
-          reject(timeoutError);
-        });
-    });
-
-  const cleanupDeclinedAccountByEmail = async () => {
-    const cleanedEmail = email.trim().toLowerCase();
-    if (!cleanedEmail) {
-      return { success: false, error: "Email is required to clean up declined account data." };
-    }
-
-    setDeclineCleanupLoading(true);
-    try {
-      const { data, error } = await withTimeout(
-        supabase.functions.invoke("decline-user-cleanup", {
-          body: { email: cleanedEmail },
-        }),
-        12000,
-        "Cleanup request timed out."
-      );
-
-      if (error) {
-        console.error("decline-user-cleanup invoke error:", error);
-        return {
-          success: false,
-          error: "Unable to clean up declined account right now. Please try again.",
-        };
-      }
-
-      if (data?.success === false) {
-        return {
-          success: false,
-          error: data?.error || "Unable to clean up declined account right now.",
-        };
-      }
-
-      return { success: true };
-    } catch (cleanupError) {
-      console.error("decline-user-cleanup unexpected error:", cleanupError);
-      return {
-        success: false,
-        error: "Unexpected cleanup error. Please try again.",
-      };
-    } finally {
-      setDeclineCleanupLoading(false);
-    }
-  };
 
   const handleDeclinedGotIt = async () => {
     setDeclineAction("got-it");
-    await cleanupDeclinedAccountByEmail();
-
     setShowErrorModal(false);
+    setError("");
     setDeclinedReason(null);
+    setVerifiedMessage(
+      "Thank you. Your declined account has been removed by the system. You can register again using the same email."
+    );
+    setShowDeclinedThankYou(true);
+    setShowVerifiedModal(true);
     setDeclineAction(null);
   };
 
   const handleDeclinedRegisterAgain = async () => {
     setDeclineAction("register-again");
-    await cleanupDeclinedAccountByEmail();
-
     setShowErrorModal(false);
     setDeclinedReason(null);
     navigate("/signup", {
@@ -108,7 +52,8 @@ const LoginPage = () => {
     setDeclinedReason(null);
 
     try {
-      const { success, error, declinedReason } = await signInWithEmail(email, password);
+      const { success, error, declinedReason } =
+        await signInWithEmail(email, password);
 
       if (!success) {
         setError(error || "Failed to sign in");
@@ -156,6 +101,7 @@ const LoginPage = () => {
         state.message ||
           "Thank you for confirming your email. Please wait for an admin to verify your account (up to 24 hours)."
       );
+      setShowDeclinedThankYou(false);
       setShowVerifiedModal(true);
       navigate(location.pathname, { replace: true, state: {} });
     }
@@ -307,7 +253,6 @@ const LoginPage = () => {
       <LoginErrorModal
         isOpen={showErrorModal}
         onClose={() => {
-          if (declineCleanupLoading) return;
           setShowErrorModal(false);
           setError("");
           setDeclinedReason(null);
@@ -317,7 +262,7 @@ const LoginPage = () => {
         declinedReason={declinedReason}
         onDeclinedGotIt={declinedReason ? handleDeclinedGotIt : undefined}
         onDeclinedRegisterAgain={declinedReason ? handleDeclinedRegisterAgain : undefined}
-        isDeclinedActionLoading={declineCleanupLoading}
+        isDeclinedActionLoading={false}
         declinedAction={declineAction}
       />
 
@@ -329,7 +274,9 @@ const LoginPage = () => {
                 <FaEnvelope />
               </div>
               <div>
-                <p className="text-sm text-gray-500 font-semibold">Email confirmed</p>
+                <p className="text-sm text-gray-500 font-semibold">
+                  {showDeclinedThankYou ? "Account update" : "Email confirmed"}
+                </p>
                 <h3 className="text-xl font-bold text-gray-900">Thank you!</h3>
               </div>
             </div>

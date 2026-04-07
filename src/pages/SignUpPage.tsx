@@ -40,7 +40,9 @@ const SignUpPage = () => {
 
   const [step, setStep] = useState<1 | 2 | 3 | 4>(1);
 
-  const incomingState = location.state as { prefillEmail?: string } | null;
+  const incomingState = location.state as {
+    prefillEmail?: string;
+  } | null;
 
   useEffect(() => {
     if (!incomingState) return;
@@ -412,6 +414,12 @@ const SignUpPage = () => {
                      </button>
                    </label>
                  </div>
+
+                 {error && (
+                   <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                     {error}
+                   </div>
+                 )}
               </div>
             )}
 

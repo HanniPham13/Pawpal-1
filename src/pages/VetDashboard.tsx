@@ -237,7 +237,7 @@ export default function VetDashboard() {
         .from("users")
         .select("*")
         .eq("role", "user")
-        .eq("verified", false)
+        .or("verified.is.null,verified.eq.false")
         .or("declined.is.null,declined.eq.false")
         .order("created_at", { ascending: false });
 
@@ -296,22 +296,67 @@ export default function VetDashboard() {
     if (!userToDecline) return;
 
     const declineReason = reason.trim() || "No specific reason was provided.";
+    const targetId = userToDecline.user_id;
 
     try {
-      const { error } = await supabase.functions.invoke("vet-decline-user", {
-        body: {
-          targetUserId: userToDecline.user_id,
-          reason: declineReason,
-        },
+      // Single server-side flow: marks declined (fires decline_log trigger), then removes profile/users/auth with service role.
+      const DECLINE_MS = 25_000;
+      const invokePromise = supabase.functions.invoke("vet-decline-user", {
+        body: { targetUserId: targetId, reason: declineReason },
+      });
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        window.setTimeout(() => reject(new Error("Decline request timed out")), DECLINE_MS);
       });
 
-      if (error) throw error;
+      const { data, error: invokeError } = await Promise.race([
+        invokePromise,
+        timeoutPromise,
+      ]);
 
-      recentlyProcessedUsersRef.current.add(userToDecline.user_id);
+      if (invokeError) {
+        console.warn("vet-decline-user invoke error:", invokeError);
+        toast.error(
+          invokeError.message ||
+            "Could not decline this user. Deploy the vet-decline-user Edge Function and ensure you are signed in as a vet."
+        );
+        return;
+      }
 
-      toast.success("User declined successfully.");
+      const payload = data as {
+        success?: boolean;
+        error?: string;
+        authDeleted?: boolean;
+        dbDeleted?: boolean;
+        authDeleteError?: string;
+      };
+
+      if (!payload?.success) {
+        toast.error(payload?.error || "Decline did not complete.");
+        return;
+      }
+
+      recentlyProcessedUsersRef.current.add(targetId);
+
+      if (payload.authDeleted && payload.dbDeleted) {
+        toast.success(
+          "User declined successfully. Their PawPal and Supabase login account were removed."
+        );
+      } else if (payload.authDeleted) {
+        toast.success("User declined and removed from Auth. Database row may need a manual check.");
+      } else {
+        if (payload.authDeleteError) {
+          console.error("vet-decline-user authDeleteError:", payload.authDeleteError);
+        }
+        toast(
+          `User was declined in PawPal, but Supabase could not delete their login account after cleanup.${
+            payload.authDeleteError ? ` Details: ${payload.authDeleteError}` : ""
+          } Check Edge Function logs or Auth → Users.`,
+          { duration: 12000 }
+        );
+      }
+
       setPendingUsers((prev) =>
-        prev.filter((pendingUser) => pendingUser.user_id !== userToDecline.user_id)
+        prev.filter((pendingUser) => pendingUser.user_id !== targetId)
       );
       setTimeout(() => {
         fetchPendingUsers();
@@ -320,7 +365,13 @@ export default function VetDashboard() {
       setUserToDecline(null);
     } catch (error) {
       console.error("Error declining user:", error);
-      toast.error("Failed to decline user");
+      const msg =
+        error instanceof Error ? error.message : "Failed to decline user";
+      toast.error(
+        msg.includes("timed out")
+          ? "Decline timed out. Check your connection and that vet-decline-user is deployed."
+          : msg
+      );
     }
   };
 

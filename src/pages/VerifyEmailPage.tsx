@@ -13,19 +13,24 @@ const VerifyEmailPage = () => {
     message: "Please check your email to verify your account before signing in.",
     pendingApproval: false,
   };
+
+  const [resolvedEmail, setResolvedEmail] = useState(email || "");
   
   const [resending, setResending] = useState(false);
   const [resendMessage, setResendMessage] = useState("");
   const [resendCooldown, setResendCooldown] = useState(0);
   const [isVerified, setIsVerified] = useState(false);
   const [isProcessingVerification, setIsProcessingVerification] = useState(false);
+  const [showApprovalFallback, setShowApprovalFallback] = useState(false);
 
   const successMessage =
-    "Thank you for confirming your email. Please wait for an admin to verify your account (up to 24 hours).";
+    "Thank you for registering to PawPal, please wait for the veterinarian to approve your account.";
 
   const waitingApprovalMessage =
     message ||
-    "Thankyou for verifying, please wait for the admin to process your account.";
+    "Thank you for registering to PawPal, please wait for the veterinarian to approve your account.";
+
+  const approvalActive = pendingApproval || showApprovalFallback;
 
   const upsertVerifiedUser = async () => {
     const {
@@ -86,6 +91,10 @@ const VerifyEmailPage = () => {
         session.user.email?.split("@")[0] ||
         null,
       role: session.user.user_metadata?.role || "user",
+      // Email confirmation ≠ vet approval; keep false until a vet/admin verifies.
+      verified: false,
+      declined: false,
+      declined_reason: null,
       adoption_validation: finalAdoptionValidation,
       created_at: new Date().toISOString(),
     };
@@ -112,11 +121,12 @@ const VerifyEmailPage = () => {
     // Prevent automatic login redirect after verification by ending the session here.
     await supabase.auth.signOut();
 
-    navigate("/login", {
+    navigate("/verify-email", {
       replace: true,
       state: {
-        verifiedThankYou: true,
+        pendingApproval: true,
         message: successMessage,
+        email: session.user.email || resolvedEmail,
       },
     });
   };
@@ -124,43 +134,130 @@ const VerifyEmailPage = () => {
   // Handle email verification callback from Supabase
   useEffect(() => {
     const handleVerification = async () => {
-      // Support both legacy hash callbacks and query-token callbacks.
       const hashParams = new URLSearchParams(window.location.hash.substring(1));
       const queryParams = new URLSearchParams(window.location.search);
 
       const accessToken = hashParams.get("access_token");
+      const refreshToken = hashParams.get("refresh_token");
       const hashType = hashParams.get("type");
       const tokenHash = queryParams.get("token_hash");
+      const queryToken = queryParams.get("token");
+      const pkceCode = queryParams.get("code");
       const queryType = queryParams.get("type");
 
-      // Some Supabase emails might omit the type query param; default to signup when a token is present.
-      const normalizedType = queryType || hashType || "signup";
+      const normalizedType = (queryType || hashType || "signup").toLowerCase();
 
-      const isHashSignupVerification = !!accessToken && normalizedType === "signup";
-      const isQuerySignupVerification = !!tokenHash && normalizedType === "signup";
+      const isSignupLikeType =
+        normalizedType === "signup" ||
+        normalizedType === "email" ||
+        normalizedType === "magiclink" ||
+        normalizedType === "invite";
 
-      if (!isHashSignupVerification && !isQuerySignupVerification) {
+      const hasHashSession = !!accessToken;
+      const hasTokenHash = !!tokenHash || !!queryToken;
+
+      const shouldProcess =
+        !!pkceCode ||
+        (hasHashSession && isSignupLikeType) ||
+        (hasTokenHash && isSignupLikeType);
+
+      if (!shouldProcess) {
         return;
       }
 
       setIsProcessingVerification(true);
 
       try {
-        if (isQuerySignupVerification && tokenHash) {
-          const { error } = await supabase.auth.verifyOtp({
-            type: "signup",
-            token_hash: tokenHash,
-          });
+        const {
+          data: { session: existingSession },
+        } = await supabase.auth.getSession();
+        const urlLooksLikeCallback = !!(
+          pkceCode ||
+          tokenHash ||
+          queryToken ||
+          accessToken
+        );
+        if (
+          existingSession?.user?.email_confirmed_at &&
+          urlLooksLikeCallback
+        ) {
+          if (existingSession.user.email) {
+            setResolvedEmail(existingSession.user.email);
+          }
+          await upsertVerifiedUser();
+          return;
+        }
+
+        if (pkceCode) {
+          const { error } = await supabase.auth.exchangeCodeForSession(pkceCode);
           if (error) throw error;
-        } else {
-          // Legacy flow: wait for session from hash callback.
-          await new Promise((resolve) => setTimeout(resolve, 1000));
+        } else if (tokenHash || queryToken) {
+          const hashValue = (tokenHash || queryToken) as string;
+          let lastError: { message: string } | null = null;
+          for (const otpType of ["signup", "email"] as const) {
+            const { error } = await supabase.auth.verifyOtp({
+              type: otpType,
+              token_hash: hashValue,
+            });
+            if (!error) {
+              lastError = null;
+              break;
+            }
+            lastError = error;
+          }
+          if (lastError) throw lastError;
+        } else if (accessToken) {
+          if (!refreshToken) {
+            await new Promise((r) => setTimeout(r, 400));
+            const {
+              data: { session: polled },
+            } = await supabase.auth.getSession();
+            if (!polled?.user) {
+              throw new Error("Missing refresh token in verification link");
+            }
+          } else {
+            const { error: sessionError } = await supabase.auth.setSession({
+              access_token: accessToken,
+              refresh_token: refreshToken,
+            });
+            if (sessionError) throw sessionError;
+          }
+          window.history.replaceState(
+            {},
+            document.title,
+            `${window.location.pathname}${window.location.search}`
+          );
+        }
+
+        const {
+          data: { session },
+        } = await supabase.auth.getSession();
+        if (session?.user?.email) {
+          setResolvedEmail(session.user.email);
         }
 
         await upsertVerifiedUser();
       } catch (error) {
         console.error("Verification error:", error);
         setResendMessage("Verification failed. Please try again or resend the email.");
+
+        // If the user arrived via a verification link but Supabase did not leave a session
+        // (expired link, already-used link, or browser blocked storage), still show the
+        // approval message so they are not stuck on an error screen.
+        if (shouldProcess) {
+          setIsVerified(true);
+          setShowApprovalFallback(true);
+          setResendMessage(successMessage);
+
+          navigate("/verify-email", {
+            replace: true,
+            state: {
+              pendingApproval: true,
+              message: successMessage,
+              email: resolvedEmail || email,
+            },
+          });
+        }
       } finally {
         setIsProcessingVerification(false);
       }
@@ -178,6 +275,22 @@ const VerifyEmailPage = () => {
     return () => window.clearInterval(timer);
   }, [resendCooldown]);
 
+  // Try to resolve email from current session for resend/CTA when state is missing
+  useEffect(() => {
+    const hydrateEmail = async () => {
+      if (resolvedEmail) return;
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      const sessionEmail = session?.user?.email || "";
+      if (sessionEmail) {
+        setResolvedEmail(sessionEmail);
+      }
+    };
+
+    hydrateEmail();
+  }, [resolvedEmail]);
+
   const handleResend = async () => {
     if (resendCooldown > 0) {
       setResendMessage(
@@ -186,7 +299,8 @@ const VerifyEmailPage = () => {
       return;
     }
 
-    if (!email) {
+    const targetEmail = resolvedEmail || email;
+    if (!targetEmail) {
       setResendMessage("Email address is required to resend verification.");
       return;
     }
@@ -194,7 +308,7 @@ const VerifyEmailPage = () => {
     setResending(true);
     setResendMessage("");
     
-    const { success, error } = await resendVerificationEmail(email);
+    const { success, error } = await resendVerificationEmail(targetEmail);
     
     if (success) {
       setResendMessage("Verification email sent! Please check your inbox.");
@@ -246,7 +360,7 @@ const VerifyEmailPage = () => {
               <FaEnvelope className="text-violet-600 text-xl md:text-3xl" />
             </div>
             <h2 className="text-2xl md:text-3xl font-bold mb-2 text-gray-900">
-              {isVerified || pendingApproval ? "Registration Received" : "Check your email"}
+              {isVerified || approvalActive ? "Thank You for Registering!" : "Check your email"}
             </h2>
 
             {isProcessingVerification && (
@@ -255,21 +369,21 @@ const VerifyEmailPage = () => {
               </p>
             )}
 
-            {!isVerified && !pendingApproval && !isProcessingVerification && email && (
+            {!isVerified && !approvalActive && !isProcessingVerification && (resolvedEmail || email) && (
               <p className="text-gray-600 mb-3 md:mb-4 break-words">
                 We've sent a verification link to:
                 <br />
-                <span className="font-semibold text-gray-800">{email}</span>
+                <span className="font-semibold text-gray-800">{resolvedEmail || email}</span>
               </p>
             )}
 
-            {!isVerified && !pendingApproval && !isProcessingVerification && (
+            {!isVerified && !approvalActive && !isProcessingVerification && (
               <p className="text-gray-600 mb-2 md:mb-6 break-words">{message}</p>
             )}
 
-            {pendingApproval && !isProcessingVerification && (
+            {approvalActive && !isProcessingVerification && (
               <p className="text-gray-700 mb-2 md:mb-6 break-words font-medium">
-                {waitingApprovalMessage}
+                {showApprovalFallback ? successMessage : waitingApprovalMessage}
               </p>
             )}
 
@@ -281,13 +395,13 @@ const VerifyEmailPage = () => {
           </div>
 
           <div className="space-y-3 md:space-y-4">
-            {!isVerified && !pendingApproval && !isProcessingVerification && (
+            {!isVerified && !approvalActive && !isProcessingVerification && (
               <p className="text-gray-600 text-sm md:text-base">
                 Didn't receive the email? Check your spam folder.
               </p>
             )}
 
-            {!isVerified && !pendingApproval && !isProcessingVerification && email && (
+            {!isVerified && !approvalActive && !isProcessingVerification && (resolvedEmail || email) && (
               <button
                 onClick={handleResend}
                 disabled={resending || resendCooldown > 0}
@@ -313,8 +427,18 @@ const VerifyEmailPage = () => {
               </div>
             )}
 
+            {/* Show Go to Login button after verification is complete */}
+            {(isVerified || approvalActive) && !isProcessingVerification && (
+              <Link
+                to="/login"
+                className="w-full inline-block text-center bg-violet-600 text-white py-2.5 md:py-3 px-4 md:px-6 rounded-lg font-semibold hover:bg-violet-700 transition"
+              >
+                Go to Login
+              </Link>
+            )}
+
             <div className="flex flex-col gap-2 pt-2 md:pt-4">
-              {!isVerified && !pendingApproval && (
+              {!isVerified && !approvalActive && (
                 <Link
                   to="/signup"
                   className="text-violet-600 hover:text-violet-800 font-semibold"
@@ -322,7 +446,7 @@ const VerifyEmailPage = () => {
                   Try using a different email address
                 </Link>
               )}
-              {!isVerified && !pendingApproval && (
+              {!isVerified && !approvalActive && (
                 <Link
                   to="/login"
                   className="text-violet-600 hover:text-violet-800 font-semibold"

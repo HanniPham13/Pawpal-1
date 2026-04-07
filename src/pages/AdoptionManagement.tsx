@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { supabase } from "../supabase-client";
 import { toast } from "react-hot-toast";
+import { FaSyncAlt } from "react-icons/fa";
 
 interface AdoptedRecord {
   pet_type?: string | null;
@@ -15,11 +16,15 @@ interface AdoptedRecord {
 
 export default function AdoptionManagement() {
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [records, setRecords] = useState<AdoptedRecord[]>([]);
 
-  const fetchAdoptions = useCallback(async () => {
-    setLoading(true);
-    setRecords([]); // Reset records at start
+  const fetchAdoptions = useCallback(async (isManualRefresh = false) => {
+    if (isManualRefresh) setRefreshing(true);
+    else {
+      setLoading(true);
+      setRecords([]);
+    }
     try {
       // Try "posts" table first (same as Post Management uses), fallback to "post"
       let allPosts: any[] = [];
@@ -95,6 +100,7 @@ export default function AdoptionManagement() {
         // Don't throw - just show empty state
         setRecords([]);
         setLoading(false);
+        setRefreshing(false);
         return;
       }
 
@@ -567,6 +573,7 @@ export default function AdoptionManagement() {
       // Force a state update by creating a new array reference
       setRecords(records.length > 0 ? [...records] : []);
       setLoading(false);
+      setRefreshing(false);
       
       // Double-check: Log if records are empty but we found adopted posts
       if (records.length === 0 && adoptedPosts.length > 0) {
@@ -585,6 +592,7 @@ export default function AdoptionManagement() {
       toast.error(`Failed to fetch adoption records: ${errorMessage}`);
       setRecords([]); // Set empty array on error
       setLoading(false);
+      setRefreshing(false);
     }
   }, []);
 
@@ -604,6 +612,23 @@ export default function AdoptionManagement() {
 
   return (
     <div className="p-6 relative">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-4">
+        <div>
+          <h2 className="text-xl font-bold text-violet-900">Adoption records</h2>
+          <p className="text-sm text-gray-600">
+            Pets marked adopted and the adopter linked from adoption requests.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => void fetchAdoptions(true)}
+          disabled={loading || refreshing}
+          className="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-violet-600 text-white font-semibold hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          <FaSyncAlt className={refreshing ? "animate-spin" : ""} />
+          Refresh
+        </button>
+      </div>
       <div className="bg-white rounded-lg shadow-md overflow-hidden">
         <table className="min-w-full divide-y divide-gray-200">
           <thead className="bg-gray-50">
@@ -626,6 +651,9 @@ export default function AdoptionManagement() {
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap">
                   <div className="font-medium text-gray-900">{r.adopter_name}</div>
+                  {r.adopter_email ? (
+                    <div className="text-sm text-gray-500">{r.adopter_email}</div>
+                  ) : null}
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                   {r.adopted_at ? new Date(r.adopted_at).toLocaleDateString(undefined, {
@@ -636,7 +664,9 @@ export default function AdoptionManagement() {
             ))}
             {records.length === 0 && (
               <tr>
-                <td colSpan={4} className="px-6 py-12 text-center text-gray-400">No adoption records found matching your filter.</td>
+                <td colSpan={4} className="px-6 py-12 text-center text-gray-400">
+                  No adopted pets found yet, or adopter details are not linked. Use Refresh after adoptions are completed.
+                </td>
               </tr>
             )}
           </tbody>

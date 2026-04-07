@@ -6,6 +6,8 @@ interface AuthResponse {
   success: boolean;
   error?: string;
   declinedReason?: string | null;
+  /** When present, pass to decline-user-cleanup so auth deletion does not rely on email scan alone. */
+  declinedUserId?: string | null;
 }
 
 interface AdoptionValidation {
@@ -36,11 +38,74 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+/** True while the URL still carries Supabase email-confirm / magic-link tokens (hash or query). */
+function isAuthEmailCallbackUrl(): boolean {
+  if (typeof window === "undefined") return false;
+  const hash = new URLSearchParams(window.location.hash.substring(1));
+  const q = new URLSearchParams(window.location.search);
+  return !!(
+    hash.get("access_token") ||
+    hash.get("refresh_token") ||
+    q.get("token_hash") ||
+    q.get("token") ||
+    q.get("code")
+  );
+}
+
 export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const [user, setUser] = useState<User | null>(null);
   const [role, setRole] = useState<string | null>(null);
 
+  const invokeDeclinedCleanup = async (
+    email: string,
+    userIds?: string[],
+    options?: { purgeDeclineLog?: boolean }
+  ): Promise<boolean> => {
+    const cleanedEmail = email.toLowerCase().trim();
+    const sanitizedUserIds =
+      userIds?.filter((id): id is string => typeof id === "string" && id.length > 0) || [];
+    const purgeDeclineLog = options?.purgeDeclineLog === true;
+
+    try {
+      const invokePromise = supabase.functions.invoke("decline-user-cleanup", {
+        body: {
+          email: cleanedEmail,
+          purgeDeclineLog,
+          ...(sanitizedUserIds.length ? { userIds: sanitizedUserIds } : {}),
+        },
+      });
+
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        window.setTimeout(
+          () => reject(new Error("Declined cleanup request timed out")),
+          12000
+        );
+      });
+
+      const { data, error } = (await Promise.race([invokePromise, timeoutPromise])) as {
+        data: { success?: boolean } | null;
+        error: { message?: string } | null;
+      };
+
+      if (error) {
+        console.warn("decline-user-cleanup invoke failed:", error.message);
+        return false;
+      }
+
+      return data?.success !== false;
+    } catch (cleanupError) {
+      console.warn("decline-user-cleanup unexpected failure:", cleanupError);
+      return false;
+    }
+  };
+
   const shouldBlockPendingUserSession = async (sessionUser: User) => {
+    // Let the verify-email page (or root URL before App redirects) finish exchanging tokens
+    // and upsert the users row; otherwise we sign out too early and the user lands on home with no session.
+    if (isAuthEmailCallbackUrl()) {
+      return false;
+    }
+
     const { data: userData, error } = await supabase
       .from("users")
       .select("role, verified")
@@ -277,34 +342,12 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
             });
         });
 
-      const invokeDeclinedCleanup = async (): Promise<boolean> => {
-        try {
-          const { data, error } = await withTimeout(
-            supabase.functions.invoke("decline-user-cleanup", {
-              body: { email: cleanedEmail },
-            }),
-            12000,
-            "Declined cleanup request timed out"
-          );
-
-          if (error) {
-            console.warn("decline-user-cleanup invoke failed:", error.message);
-            return false;
-          }
-
-          return data?.success !== false;
-        } catch (cleanupError) {
-          console.warn("decline-user-cleanup unexpected failure:", cleanupError);
-          return false;
-        }
-      };
-
       // Ensure we are starting from a clean session to avoid weird auth redirects
       // if the user was previously signed in on this device.
       await supabase.auth.signOut();
 
-      // Best-effort cleanup for declined users before trying signup.
-      await invokeDeclinedCleanup();
+      // Best-effort cleanup for declined users before trying signup; purge decline_log after cleanup.
+      await invokeDeclinedCleanup(cleanedEmail, undefined, { purgeDeclineLog: true });
 
       // CLEAN OUT DECLINED USER RECORD
       const { error: cleanupError } = await supabase
@@ -388,7 +431,9 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
           authError.message.includes("User already registered")
         ) {
           // If the email belongs to a previously declined user, cleanup can unlock signup.
-          const cleanupWorked = await invokeDeclinedCleanup();
+          const cleanupWorked = await invokeDeclinedCleanup(cleanedEmail, undefined, {
+            purgeDeclineLog: true,
+          });
           if (cleanupWorked) {
             const { data: retryData, error: retryError } = await withTimeout(
               attemptSignUp(),
@@ -449,7 +494,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         type: 'signup',
         email: email.toLowerCase().trim(),
         options: {
-          emailRedirectTo: `${window.location.origin}/verify-email`,
+          emailRedirectTo: `${window.location.origin}/verify-email?type=signup`,
         },
       });
 
@@ -478,21 +523,34 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       const cleanedEmail = email.toLowerCase().trim();
       
       // FIRST: Check decline log (covers cases where the account was deleted after being declined)
-      const { data: declineLogData, error: declineLogError } = await supabase.rpc(
-        "get_decline_reason",
-        { email_input: cleanedEmail }
-      );
+      try {
+        const { data: declineLogData, error: declineLogError } = await Promise.race([
+          supabase.rpc("get_decline_reason", { email_input: cleanedEmail }),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("RPC timeout")), 5000)
+          )
+        ]) as any;
 
-      const declineLogEntry = Array.isArray(declineLogData)
-        ? declineLogData[0]
-        : declineLogData;
+        const declineLogEntry = Array.isArray(declineLogData)
+          ? declineLogData[0]
+          : declineLogData;
 
-      if (!declineLogError && declineLogEntry?.reason) {
-        return {
-          success: false,
-          error: "Your account has been declined and you cannot log in.",
-          declinedReason: declineLogEntry.reason,
-        };
+        if (!declineLogError && declineLogEntry?.reason) {
+          const logUserId =
+            typeof declineLogEntry?.user_id === "string" ? declineLogEntry.user_id : null;
+          await invokeDeclinedCleanup(cleanedEmail, logUserId ? [logUserId] : undefined, {
+            purgeDeclineLog: true,
+          });
+          return {
+            success: false,
+            error: "Your account has been declined and you cannot log in.",
+            declinedReason: declineLogEntry.reason,
+            declinedUserId: logUserId,
+          };
+        }
+      } catch (rpcError) {
+        // If RPC fails (function doesn't exist or times out), continue with login
+        console.warn("Decline log check failed, continuing with login:", rpcError);
       }
 
       // SECOND: Check if user is declined BEFORE attempting password authentication
@@ -505,12 +563,18 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
       // If we found a declined user, return decline reason immediately
       if (!declinedCheckError && declinedCheck && declinedCheck.declined === true) {
+        await invokeDeclinedCleanup(
+          cleanedEmail,
+          declinedCheck.user_id ? [declinedCheck.user_id] : undefined,
+          { purgeDeclineLog: true }
+        );
         return {
           success: false,
           error: "Your account has been declined and you cannot log in.",
           declinedReason:
             declinedCheck.declined_reason ||
             "Your account was declined during veterinary review.",
+          declinedUserId: declinedCheck.user_id || null,
         };
       }
 
@@ -562,6 +626,9 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
       // Double-check declined status (in case it was set after the initial check)
       if (userData.declined === true) {
+        await invokeDeclinedCleanup(cleanedEmail, [data.user.id], {
+          purgeDeclineLog: true,
+        });
         await supabase.auth.signOut();
         return {
           success: false,
@@ -569,6 +636,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
           declinedReason:
             userData.declined_reason ||
             "Your account was declined during veterinary review.",
+          declinedUserId: data.user.id,
         };
       }
 
