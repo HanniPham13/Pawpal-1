@@ -6,6 +6,64 @@ interface Payload {
   reason?: string | null;
 }
 
+/**
+ * Delete public rows that reference auth.users(id) without ON DELETE CASCADE.
+ * If any remain, GoTrue's admin.deleteUser() fails with a database error.
+ */
+async function scrubPublicReferencesToUser(admin: any, uid: string) {
+  const warn = (step: string, err: { message?: string } | null) => {
+    if (err?.message) console.warn(`[vet-decline-user scrub] ${step}: ${err.message}`);
+  };
+
+  const del = async (step: string, fn: () => any) => {
+    const { error } = await fn();
+    warn(step, error);
+  };
+
+  await del("messages.sender_id", () => admin.from("messages").delete().eq("sender_id", uid));
+  await del("messages.receiver_id", () => admin.from("messages").delete().eq("receiver_id", uid));
+
+  await del("user_conversations", () => admin.from("user_conversations").delete().eq("user_id", uid));
+
+  await del("adoption_requests", () =>
+    admin.from("adoption_requests").delete().or(`requester_id.eq.${uid},owner_id.eq.${uid}`)
+  );
+
+  await del("adoption_applications", () =>
+    admin.from("adoption_applications").delete().eq("applicant_id", uid)
+  );
+
+  await del("notifications", () => admin.from("notifications").delete().eq("user_id", uid));
+  await del("likes", () => admin.from("likes").delete().eq("user_id", uid));
+  await del("comments", () => admin.from("comments").delete().eq("user_id", uid));
+  await del("votes", () => admin.from("votes").delete().eq("user_id", uid));
+  await del("user_badges", () => admin.from("user_badges").delete().eq("user_id", uid));
+
+  await del("posts.user_id", () => admin.from("posts").delete().eq("user_id", uid));
+  await del("posts.owner_id", () => admin.from("posts").delete().eq("owner_id", uid));
+  await del("post.user_id", () => admin.from("post").delete().eq("user_id", uid));
+  await del("post.auth_users_id", () => admin.from("post").delete().eq("auth_users_id", uid));
+}
+
+async function deleteAuthUserWithRetries(
+  admin: any,
+  uid: string
+): Promise<{ ok: boolean; lastError: string | null }> {
+  let lastError: string | null = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) {
+      await new Promise((r) => setTimeout(r, 500 * attempt));
+    }
+    const { error } = await admin.auth.admin.deleteUser(uid);
+    if (!error) {
+      return { ok: true, lastError: null };
+    }
+    lastError = error.message || String(error);
+    console.error(`[vet-decline-user] deleteUser attempt ${attempt + 1} failed:`, lastError);
+  }
+  return { ok: false, lastError };
+}
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
@@ -125,8 +183,9 @@ Deno.serve(async (req) => {
       console.error("Failed to sync decline metadata:", metadataError.message);
     }
 
-    // Delete application data to let the user sign up again cleanly.
-    // Service role bypasses RLS, so we can hard-delete here.
+    // Break FKs that do not use ON DELETE CASCADE (common with messages, legacy tables).
+    await scrubPublicReferencesToUser(admin, targetUser.user_id);
+
     const { error: profileDeleteError } = await admin
       .from("profiles")
       .delete()
@@ -145,14 +204,10 @@ Deno.serve(async (req) => {
       console.error("Failed to delete user row after decline:", userDeleteError.message);
     }
 
-    // Remove the auth user to fully block access and cascade other FK rows.
-    let authDeleted = false;
-    const { error: deleteError } = await admin.auth.admin.deleteUser(targetUser.user_id);
-    if (deleteError) {
-      console.error("Failed to delete auth user after decline:", deleteError.message);
-    } else {
-      authDeleted = true;
-    }
+    const { ok: authDeleted, lastError: authDeleteError } = await deleteAuthUserWithRetries(
+      admin,
+      targetUser.user_id
+    );
 
     return json({
       success: true,
@@ -160,6 +215,7 @@ Deno.serve(async (req) => {
       email: targetUser.email,
       authDeleted,
       dbDeleted: !userDeleteError,
+      ...(authDeleteError ? { authDeleteError } : {}),
     });
   } catch (error) {
     return json(

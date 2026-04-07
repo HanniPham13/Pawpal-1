@@ -26,6 +26,8 @@ import Home from "./pages/Home";
 import { useAuth } from "./context/AuthContext";
 import { supabase } from "./supabase-client";
 
+const VISIT_COUNTER_SESSION_KEY = "pawpal_visit_counter_session";
+
 const PetProfileWrapper = () => {
   const { id } = useParams<{ id: string }>();
   return <PetProfile petId={Number(id)} />;
@@ -51,19 +53,42 @@ function App() {
     const queryParams = new URLSearchParams(window.location.search);
 
     const hasHashAuthToken = !!hashParams.get("access_token");
-    const hasQueryOtpToken = !!queryParams.get("token_hash");
-    const callbackType = hashParams.get("type") || queryParams.get("type");
+    const hasQueryOtpToken =
+      !!queryParams.get("token_hash") || !!queryParams.get("token");
+    const hasPkceCode = !!queryParams.get("code");
+    const callbackType = (hashParams.get("type") || queryParams.get("type") || "").toLowerCase();
     const isSignupLikeCallback =
       ["signup", "magiclink", "invite", "email"].includes(callbackType || "") ||
+      hasPkceCode ||
       // Fallback: some links omit the type but still carry a token hash/access token.
       (!callbackType && (hasHashAuthToken || hasQueryOtpToken));
 
-    if ((hasHashAuthToken || hasQueryOtpToken) && isSignupLikeCallback && location.pathname !== "/verify-email") {
+    if (
+      (hasHashAuthToken || hasQueryOtpToken || hasPkceCode) &&
+      isSignupLikeCallback &&
+      location.pathname !== "/verify-email"
+    ) {
       navigate(`/verify-email${window.location.search}${window.location.hash}`, {
         replace: true,
       });
     }
   }, [location.pathname, navigate]);
+
+  useEffect(() => {
+    const incrementVisitOncePerSession = async () => {
+      if (sessionStorage.getItem(VISIT_COUNTER_SESSION_KEY) === "done") return;
+
+      const { error } = await supabase.rpc("increment_visit_count");
+      if (error) {
+        console.error("Error incrementing visit count:", error);
+        return;
+      }
+
+      sessionStorage.setItem(VISIT_COUNTER_SESSION_KEY, "done");
+    };
+
+    incrementVisitOncePerSession();
+  }, []);
 
   useEffect(() => {
     const enforcePendingApprovalGate = async () => {
@@ -88,7 +113,7 @@ function App() {
             state: {
               pendingApproval: true,
               message:
-                "Thankyou for registering, please wait for the verification so you can log in.",
+                "Thank you for registering to PawPal, please wait for the veterinarian to approve your account.",
             },
             replace: true,
           });
@@ -103,7 +128,7 @@ function App() {
           state: {
             pendingApproval: true,
             message:
-              "Thankyou for registering, please wait for the verification so you can log in.",
+              "Thank you for registering to PawPal, please wait for the veterinarian to approve your account.",
           },
           replace: true,
         });
@@ -160,9 +185,9 @@ function App() {
         <Route path="/forgot-password" element={<ForgotPasswordPage />} />
         <Route path="/about" element={<AboutPage />} />
         <Route path="/contact" element={<ContactPage />} />
-        <Route path="verify-email" element={<VerifyEmailPage />} />
-        <Route path="vet-dashboard" element={<VetDashboard />} />
-        <Route path="admin-dashboard/*" element={<AdminDashboard />} />
+        <Route path="/verify-email" element={<VerifyEmailPage />} />
+        <Route path="/vet-dashboard" element={<VetDashboard />} />
+        <Route path="/admin-dashboard/*" element={<AdminDashboard />} />
 
         <Route
           path="*"
