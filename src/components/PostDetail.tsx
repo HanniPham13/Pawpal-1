@@ -18,6 +18,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { toast } from "react-hot-toast";
 import { AdoptionRequestsList } from "./AdoptionRequestsList";
 import { MessageButton } from "./MessageButton";
+import { resolveUserIdentity } from "../utils/userIdentity";
 
 interface ModalProps {
   isOpen: boolean;
@@ -281,6 +282,36 @@ const updatePost = async (postId: number, updates: Partial<Post>) => {
   if (error) throw error;
 };
 
+const isPostIdSchemaError = (error: { code?: string | null; message?: string | null; details?: string | null }) => {
+  if (!error) return false;
+  const text = `${error.message || ""} ${error.details || ""}`.toLowerCase();
+  return error.code === "23503" || (text.includes("post_id") && text.includes("foreign key"));
+};
+
+const insertNotificationWithFallback = async (payload: {
+  user_id: string;
+  type: string;
+  message: string;
+  created_at: string;
+  requester_id?: string;
+  link?: string;
+  post_id?: number;
+}) => {
+  const firstAttempt = await supabase.from("notifications").insert([payload]);
+  if (!firstAttempt.error) return null;
+
+  if (payload.post_id && isPostIdSchemaError(firstAttempt.error)) {
+    const withoutPostId = { ...payload };
+    delete withoutPostId.post_id;
+    const secondAttempt = await supabase
+      .from("notifications")
+      .insert([withoutPostId]);
+    return secondAttempt.error;
+  }
+
+  return firstAttempt.error;
+};
+
 // Utility function to create adoption chat (shared between PostDetail and AdoptionRequestDetails)
 const createAdoptionChat = async ({
   adopterId,
@@ -305,6 +336,7 @@ const createAdoptionChat = async ({
       specific_post_id: postId,
     });
   if (!existingError && existing && existing.length > 0) return existing[0].conversation_id;
+<<<<<<< Updated upstream
   
   // Generate UUID client-side so we don't need SELECT after INSERT
   // (the SELECT RLS policy on conversations requires the user to be in user_conversations,
@@ -334,6 +366,56 @@ const createAdoptionChat = async ({
     { user_id: adopterId, conversation_id: conversationId, joined_at: new Date().toISOString() },
     { user_id: ownerId, conversation_id: conversationId, joined_at: new Date().toISOString() },
   ]);
+=======
+
+  const baseConversationPayload = {
+    title: adopterName || ownerName || "Chat",
+    adopter_name: adopterName,
+    owner_name: ownerName || "",
+    pet_name: petName,
+    is_group: false,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+
+  let createResult = await supabase
+    .from("conversations")
+    .insert([{ ...baseConversationPayload, post_id: postId }])
+    .select()
+    .single();
+
+  if (createResult.error && isPostIdSchemaError(createResult.error)) {
+    createResult = await supabase
+      .from("conversations")
+      .insert([baseConversationPayload])
+      .select()
+      .single();
+  }
+
+  if (createResult.error) throw createResult.error;
+
+  const conversationId = createResult.data.id;
+
+  const { error: membersError } = await supabase
+    .from("user_conversations")
+    .upsert(
+      [
+        {
+          user_id: adopterId,
+          conversation_id: conversationId,
+          joined_at: new Date().toISOString(),
+        },
+        {
+          user_id: ownerId,
+          conversation_id: conversationId,
+          joined_at: new Date().toISOString(),
+        },
+      ],
+      { onConflict: "user_id,conversation_id", ignoreDuplicates: true }
+    );
+
+  if (membersError) throw membersError;
+>>>>>>> Stashed changes
   return conversationId;
 };
 
@@ -384,6 +466,7 @@ const sendAdoptionRequest = async (
     }
 
     // Also create a notification for the pet owner
+<<<<<<< Updated upstream
     try {
       await supabase
         .from("notifications")
@@ -398,10 +481,28 @@ const sendAdoptionRequest = async (
         }]);
     } catch (notifErr) {
       console.error("Error creating notification:", notifErr);
+=======
+    const { name: requesterName } = await resolveUserIdentity(requesterId);
+    const { name: ownerName } = await resolveUserIdentity(ownerId);
+
+    const notificationError = await insertNotificationWithFallback({
+      user_id: ownerId,
+      type: "adoption_request",
+      message: `New adoption request for ${petName}${reason ? ` - Reason: ${reason}` : ""}`,
+      created_at: new Date().toISOString(),
+      requester_id: requesterId,
+      link: `/post/${postId}`,
+      post_id: postId,
+    });
+
+    if (notificationError) {
+      console.error("Error creating notification:", notificationError);
+>>>>>>> Stashed changes
     }
 
     // Create chat immediately after submitting adoption request
     try {
+<<<<<<< Updated upstream
       // Get adopter name - try profiles, users table, then RPC
       let requesterName = "User";
       try {
@@ -448,19 +549,28 @@ const sendAdoptionRequest = async (
         }
       } catch { /* ignore */ }
 
+=======
+>>>>>>> Stashed changes
       const conversationId = await createAdoptionChat({
         adopterId: requesterId,
-        ownerId: ownerId,
-        postId: postId,
+        ownerId,
+        postId,
         adopterName: requesterName,
+<<<<<<< Updated upstream
         ownerName: ownerDisplayName,
         petName: petName,
       });
       
       return { conversationId };
+=======
+        ownerName,
+        petName,
+      });
+
+      return { ...data, conversationId };
+>>>>>>> Stashed changes
     } catch (chatError) {
       console.error("Error creating chat:", chatError);
-      // Don't throw - adoption request was successful, chat creation is optional
     }
 
     return data;
@@ -502,6 +612,7 @@ const cancelAdoptionRequest = async (postId: number, requesterId: string) => {
     }
 
     // Create a notification for the owner
+<<<<<<< Updated upstream
     try {
       await supabase
         .from("notifications")
@@ -515,6 +626,24 @@ const cancelAdoptionRequest = async (postId: number, requesterId: string) => {
         }]);
     } catch (notifErr) {
       console.error("Error creating cancellation notification:", notifErr);
+=======
+    const notificationError = await insertNotificationWithFallback({
+      user_id: existingRequests[0].owner_id,
+      type: "adoption_cancelled",
+      message: `An adoption request for your pet has been cancelled`,
+      created_at: new Date().toISOString(),
+      requester_id: requesterId,
+      link: `/post/${postId}`,
+      post_id: postId,
+    });
+
+    if (notificationError) {
+      console.error(
+        "Error creating cancellation notification:",
+        notificationError
+      );
+      // Don't throw here, we still want to consider the cancellation as successful
+>>>>>>> Stashed changes
     }
 
     return true;

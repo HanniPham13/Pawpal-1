@@ -4,6 +4,7 @@ import { FaBars, FaComments, FaPaperPlane, FaChevronLeft, FaChevronRight, FaChec
 import { supabase } from "../supabase-client";
 import { useAuth } from "../context/AuthContext";
 import toast from "react-hot-toast";
+import { resolveUserIdentity } from "../utils/userIdentity";
 
 // Interface for chat messages
 interface Message {
@@ -47,6 +48,12 @@ interface ConversationDetails {
   created_at: string;
   updated_at: string;
 }
+
+const isPlaceholderName = (value?: string | null) =>
+  !value ||
+  value.trim().length === 0 ||
+  /^user(\s|$)/i.test(value) ||
+  /unknown/i.test(value);
 
 const ChatPage: React.FC = () => {
   // Get the conversation ID from URL params, or null if on main chat page
@@ -102,6 +109,7 @@ const ChatPage: React.FC = () => {
   // Resolve display names consistently so chat shows real names (e.g., "Joey De Guzman")
   const getUserInfo = useCallback(
     async (userId: string) => {
+<<<<<<< Updated upstream
       if (!userId) return { name: "User", email: "", avatar: null };
 
       try {
@@ -172,8 +180,11 @@ const ChatPage: React.FC = () => {
           avatar: null,
         };
       }
+=======
+      return resolveUserIdentity(userId);
+>>>>>>> Stashed changes
     },
-    [user]
+    []
   );
 
   // Fetch all conversations for the current user
@@ -256,7 +267,86 @@ const ChatPage: React.FC = () => {
                   avatar: null as string | null,
                 };
 
+<<<<<<< Updated upstream
                 // Get the other user's username (email prefix)
+=======
+                // Refresh participant names if missing or placeholder values
+                if (isPlaceholderName(convo.adopter_name) || isPlaceholderName(convo.owner_name)) {
+                  if (members && members.length > 0) {
+                    otherUserId = members[0].user_id;
+                    
+                    // Check adoption requests to determine proper roles
+                    const { data: adoptionData, error: adoptionError } = await supabase
+                      .from("adoption_requests")
+                      .select("requester_id, owner_id, pet_name")
+                      .or(`requester_id.eq.${user.id},owner_id.eq.${user.id}`)
+                      .or(`requester_id.eq.${otherUserId},owner_id.eq.${otherUserId}`)
+                      .order("updated_at", { ascending: false })
+                      .limit(1);
+
+                    if (!adoptionError && adoptionData && adoptionData.length > 0) {
+                      const adoption = adoptionData[0];
+
+                      const [currentIdentity, otherIdentity] = await Promise.all([
+                        getUserInfo(user.id),
+                        getUserInfo(otherUserId),
+                      ]);
+
+                      const currentUserName =
+                        currentIdentity.name || user.email || "You";
+                      const otherUserName = otherIdentity.name || "User";
+
+                      // Determine who is adopter and who is owner
+                      let adopterName, ownerName;
+                      if (user.id === adoption.requester_id) {
+                        // Current user is the adopter
+                        adopterName = currentUserName;
+                        ownerName = otherUserName;
+                      } else {
+                        // Current user is the owner
+                        adopterName = otherUserName;
+                        ownerName = currentUserName;
+                      }
+
+                      // Update conversation with participant names
+                      await supabase
+                        .from("conversations")
+                        .update({
+                          adopter_name: adopterName,
+                          owner_name: ownerName,
+                        })
+                        .eq("id", convo.id);
+
+                      // Set values for current session
+                      convo.adopter_name = adopterName;
+                      convo.owner_name = ownerName;
+                    } else {
+                      // Fallback to simple approach if no adoption request found
+                      const [yourIdentity, otherIdentity] = await Promise.all([
+                        getUserInfo(user.id),
+                        getUserInfo(otherUserId),
+                      ]);
+                      const yourName = yourIdentity.name || user.email || "You";
+                      const otherUserName = otherIdentity.name || "User";
+
+                    // Update conversation with participant names
+                    await supabase
+                      .from("conversations")
+                      .update({
+                        adopter_name: yourName,
+                        owner_name: otherUserName,
+                      })
+                      .eq("id", convo.id);
+
+                    // Set values for current session
+                    convo.adopter_name = yourName;
+                    convo.owner_name = otherUserName;
+                    }
+                  }
+                }
+
+                // Get user info first - prioritize user name over pet name
+>>>>>>> Stashed changes
                 if (members && members.length > 0) {
                   otherUserId = members[0].user_id;
                   otherUserInfo = await getUserInfo(otherUserId);
@@ -315,6 +405,7 @@ const ChatPage: React.FC = () => {
                   );
                 }
 
+<<<<<<< Updated upstream
                 const currentUserCandidates = [
                   user?.user_metadata?.full_name,
                   user?.email,
@@ -336,6 +427,17 @@ const ChatPage: React.FC = () => {
                     const normalized = String(name).trim().toLowerCase();
                     return !currentUserCandidates.includes(normalized);
                   }) || "User";
+=======
+                // Always prefer the actual other user's resolved profile name.
+                const resolvedOtherUserName = otherUserInfo.name;
+                const combinedDisplayName = !isPlaceholderName(
+                  resolvedOtherUserName
+                )
+                  ? resolvedOtherUserName
+                  : !isPlaceholderName(convo.title)
+                  ? convo.title
+                  : "User";
+>>>>>>> Stashed changes
 
                 const processedConvo = {
                   conversation_id: convo.id,
@@ -381,7 +483,13 @@ const ChatPage: React.FC = () => {
                   created_at: convo.created_at,
                   updated_at: convo.updated_at,
                   last_message: "Error loading message",
+<<<<<<< Updated upstream
                   other_user_name: !isGenericChatName(convo.title) ? convo.title : "User",
+=======
+                  other_user_name: !isPlaceholderName(convo.title)
+                    ? convo.title
+                    : "User",
+>>>>>>> Stashed changes
                   unread_count: 0,
                 } as Conversation;
               }
@@ -578,6 +686,7 @@ const ChatPage: React.FC = () => {
 
       if (!membersError && members && members.length > 0) {
         otherUserId = members[0].user_id;
+<<<<<<< Updated upstream
 
         // Check adoption requests to determine roles
         const { data: adoptionData, error: adoptionError } = await supabase
@@ -592,6 +701,10 @@ const ChatPage: React.FC = () => {
           const otherInfo = await getUserInfo(otherUserId);
           otherUserName = otherInfo.name;
         }
+=======
+        const otherIdentity = await getUserInfo(otherUserId);
+        otherUserName = otherIdentity.name;
+>>>>>>> Stashed changes
       }
 
       // Format messages with sender info
@@ -727,8 +840,54 @@ const ChatPage: React.FC = () => {
             ? conversationData.title
             : "User";
 
+<<<<<<< Updated upstream
         // Update conversation title with username
         if (!isGenericChatName(username)) {
+=======
+        // Check for adoption requests between these users
+        const { data: adoptionData, error: adoptionError } = await supabase
+          .from("adoption_requests")
+          .select("pet_name, post_id, status, requester_id, owner_id")
+          .or(`requester_id.eq.${user.id},owner_id.eq.${user.id}`)
+          .or(`requester_id.eq.${otherUserId},owner_id.eq.${otherUserId}`)
+          .order("updated_at", { ascending: false })
+          .limit(1);
+
+        if (
+          !adoptionError &&
+          adoptionData &&
+          adoptionData.length > 0 &&
+          adoptionData[0].pet_name
+        ) {
+          const adoption = adoptionData[0];
+
+          const [currentIdentity, otherIdentity] = await Promise.all([
+            getUserInfo(user.id),
+            getUserInfo(otherUserId),
+          ]);
+          const currentUserName = currentIdentity.name || user.email || "You";
+          const otherUserName = otherIdentity.name || "User";
+
+          // Determine who is adopter and who is owner
+          let adopterName, ownerName;
+          if (user.id === adoption.requester_id) {
+            // Current user is the adopter
+            adopterName = currentUserName;
+            ownerName = otherUserName;
+          } else {
+            // Current user is the owner
+            adopterName = otherUserName;
+            ownerName = currentUserName;
+          }
+
+          // This is handled in the update above
+
+          // Get user names for the title
+          const otherUserInfo = await getUserInfo(otherUserId);
+          const userDisplayName = otherUserInfo.name || otherUserName;
+
+          // Store this info in the conversation for future use
+>>>>>>> Stashed changes
           await supabase
             .from("conversations")
             .update({ title: username })
@@ -839,7 +998,7 @@ const ChatPage: React.FC = () => {
         setIsCreatingConversation(false);
       }
     },
-    [user, location.state, navigate]
+    [user, location.state, navigate, getUserInfo]
   );
 
   // Function to clean up duplicate conversations for the current user
@@ -992,7 +1151,10 @@ const ChatPage: React.FC = () => {
           // Profile doesn't exist, create one
           await supabase.from("profiles").insert({
             id: user.id,
-            full_name: user.email || `User ${user.id.substring(0, 6)}`,
+            full_name:
+              user.user_metadata?.full_name ||
+              user.email?.split("@")[0] ||
+              `User ${user.id.substring(0, 6)}`,
             updated_at: new Date().toISOString(),
           });
         }
@@ -1103,35 +1265,15 @@ const ChatPage: React.FC = () => {
                 (c) => c.conversation_id === conversationId
               );
 
-              if (
-                currentConversation &&
-                currentConversation.adopter_name &&
-                currentConversation.owner_name
-              ) {
-                // Determine which base name to show based on the viewer's role
-                let baseName: string;
-                if (user.email === currentConversation.adopter_name) {
-                  // Viewer is adopter -> show owner name
-                  baseName = currentConversation.owner_name;
-                } else if (user.email === currentConversation.owner_name) {
-                  // Viewer is owner -> show adopter name
-                  baseName = currentConversation.adopter_name;
-                } else {
-                  // Fallback to getUserInfo if we can't match roles
               const senderInfo = await getUserInfo(newMessage.sender_id);
-                  baseName = senderInfo.name;
-                }
-
-                const petNameForLabel = currentConversation.pet_name;
-                formattedMessage.sender_name =
-                  petNameForLabel && baseName
-                    ? `${baseName} · ${petNameForLabel}`
-                    : baseName;
-              } else {
-                // Fallback to getUserInfo if conversation data not available
-                const senderInfo = await getUserInfo(newMessage.sender_id);
-                formattedMessage.sender_name = senderInfo.name;
-              }
+              const baseName = !isPlaceholderName(senderInfo.name)
+                ? senderInfo.name
+                : "User";
+              const petNameForLabel = currentConversation?.pet_name;
+              formattedMessage.sender_name =
+                petNameForLabel && baseName
+                  ? `${baseName} · ${petNameForLabel}`
+                  : baseName;
 
               formattedMessage.sender_avatar = null;
             }

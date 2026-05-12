@@ -19,7 +19,8 @@ interface Notification {
   user_id: string;
   type: string;
   message: string;
-  read: boolean;
+  read?: boolean;
+  is_read?: boolean;
   created_at: string;
   link?: string;
   post_id?: number;
@@ -36,6 +37,22 @@ interface EnhancedNotification extends Notification {
   petAge?: number;
   requesterName?: string;
 }
+
+const isNotificationRead = (notification: Notification) =>
+  notification.read ?? notification.is_read ?? false;
+
+const isMissingColumnError = (
+  error: { message?: string | null; details?: string | null } | null,
+  column: string
+) => {
+  if (!error) return false;
+  const errorText = `${error.message ?? ""} ${error.details ?? ""}`.toLowerCase();
+  return (
+    errorText.includes(`"${column.toLowerCase()}"`) ||
+    errorText.includes(`'${column.toLowerCase()}'`) ||
+    errorText.includes(` ${column.toLowerCase()} `)
+  );
+};
 
 export const NotificationBadge: React.FC = () => {
   const { user } = useAuth();
@@ -56,9 +73,52 @@ export const NotificationBadge: React.FC = () => {
   const [selectMode, setSelectMode] = useState(false);
   const navigate = useNavigate();
 
+  const markNotificationAsReadInDb = async (notificationId: number) => {
+    const primaryUpdate = await supabase
+      .from("notifications")
+      .update({ read: true })
+      .eq("id", notificationId);
+
+    if (!isMissingColumnError(primaryUpdate.error, "read")) {
+      return primaryUpdate.error;
+    }
+
+    const fallbackUpdate = await supabase
+      .from("notifications")
+      .update({ is_read: true })
+      .eq("id", notificationId);
+
+    return fallbackUpdate.error;
+  };
+
+  const markAllNotificationsAsReadInDb = async (userId: string) => {
+    const primaryUpdate = await supabase
+      .from("notifications")
+      .update({ read: true })
+      .eq("user_id", userId)
+      .eq("read", false);
+
+    if (!isMissingColumnError(primaryUpdate.error, "read")) {
+      return primaryUpdate.error;
+    }
+
+    const fallbackUpdate = await supabase
+      .from("notifications")
+      .update({ is_read: true })
+      .eq("user_id", userId)
+      .eq("is_read", false);
+
+    return fallbackUpdate.error;
+  };
+
   // Fetch unread notifications count
   useEffect(() => {
-    if (!user) return;
+    if (!user) {
+      setUnreadCount(0);
+      setNotifications([]);
+      setEnhancedNotifications([]);
+      return;
+    }
 
     const fetchNotifications = async () => {
       setLoading(true);
@@ -77,7 +137,7 @@ export const NotificationBadge: React.FC = () => {
         if (data) {
           setNotifications(data);
           // Count unread ones
-          const unread = data.filter((n) => !n.read).length;
+          const unread = data.filter((n) => !isNotificationRead(n)).length;
           setUnreadCount(unread);
 
           // Enhance notifications with additional data
@@ -157,11 +217,15 @@ export const NotificationBadge: React.FC = () => {
 
     // Set up real-time subscription for new notifications
     const subscription = supabase
-      .channel("notifications_changes")
+      .channel(
+        `notifications_changes_${user.id}_${Math.random()
+          .toString(36)
+          .slice(2)}`
+      )
       .on(
         "postgres_changes",
         {
-          event: "INSERT",
+          event: "*",
           schema: "public",
           table: "notifications",
           filter: `user_id=eq.${user.id}`,
@@ -173,7 +237,7 @@ export const NotificationBadge: React.FC = () => {
       .subscribe();
 
     return () => {
-      subscription.unsubscribe();
+      supabase.removeChannel(subscription);
     };
   }, [user]);
 
@@ -196,8 +260,69 @@ export const NotificationBadge: React.FC = () => {
       if (data) {
         setNotifications(data);
         // Count unread ones
-        const unread = data.filter((n) => !n.read).length;
+        const unread = data.filter((n) => !isNotificationRead(n)).length;
         setUnreadCount(unread);
+
+        const enhanced = await Promise.all(
+          data.map(async (notification) => {
+            const enhancedNotification: EnhancedNotification = {
+              ...notification,
+            };
+
+            if (
+              notification.type === "adoption_request" &&
+              notification.requester_id
+            ) {
+              try {
+                if (notification.post_id) {
+                  const { data: requestData } = await supabase
+                    .from("adoption_requests")
+                    .select("id, status, created_at")
+                    .eq("post_id", notification.post_id)
+                    .eq("requester_id", notification.requester_id)
+                    .order("created_at", { ascending: false })
+                    .maybeSingle();
+
+                  if (requestData) {
+                    enhancedNotification.requestId = requestData.id;
+                    enhancedNotification.requestStatus = requestData.status;
+                    enhancedNotification.requestDate = requestData.created_at;
+                  }
+                }
+
+                if (notification.post_id) {
+                  const { data: postData } = await supabase
+                    .from("posts")
+                    .select("name, image_url, breed, age")
+                    .eq("id", notification.post_id)
+                    .maybeSingle();
+
+                  if (postData) {
+                    enhancedNotification.petName = postData.name || "a pet";
+                    enhancedNotification.petImage = postData.image_url;
+                    enhancedNotification.petBreed = postData.breed;
+                    enhancedNotification.petAge = postData.age;
+                  }
+                }
+
+                if (notification.requester_id) {
+                  const requesterName = await getRequesterNameForNotification(
+                    notification.requester_id
+                  );
+                  if (requesterName) {
+                    enhancedNotification.requesterName = requesterName;
+                  }
+                }
+              } catch (err) {
+                console.error("Error enhancing notification:", err);
+              }
+            }
+
+            return enhancedNotification;
+          })
+        );
+
+        setEnhancedNotifications(enhanced);
 
         // Reset selection when refreshing
         setSelectedNotifications([]);
@@ -253,10 +378,7 @@ export const NotificationBadge: React.FC = () => {
   };
 
   const markAsRead = async (notificationId: number) => {
-    const { error } = await supabase
-      .from("notifications")
-      .update({ read: true })
-      .eq("id", notificationId);
+    const error = await markNotificationAsReadInDb(notificationId);
 
     if (error) {
       console.error("Error marking notification as read:", error);
@@ -267,7 +389,7 @@ export const NotificationBadge: React.FC = () => {
     setNotifications((prevNotifications) =>
       prevNotifications.map((notification) =>
         notification.id === notificationId
-          ? { ...notification, read: true }
+          ? { ...notification, read: true, is_read: true }
           : notification
       )
     );
@@ -275,7 +397,7 @@ export const NotificationBadge: React.FC = () => {
     setEnhancedNotifications((prevNotifications) =>
       prevNotifications.map((notification) =>
         notification.id === notificationId
-          ? { ...notification, read: true }
+          ? { ...notification, read: true, is_read: true }
           : notification
       )
     );
@@ -293,7 +415,7 @@ export const NotificationBadge: React.FC = () => {
     }
 
     // Mark as read
-    if (!notification.read) {
+    if (!isNotificationRead(notification)) {
       markAsRead(notification.id);
     }
 
@@ -368,13 +490,9 @@ export const NotificationBadge: React.FC = () => {
   };
 
   const markAllAsRead = async () => {
-    if (notifications.length === 0) return;
+    if (notifications.length === 0 || !user) return;
 
-    const { error } = await supabase
-      .from("notifications")
-      .update({ read: true })
-      .eq("user_id", user?.id)
-      .eq("read", false);
+    const error = await markAllNotificationsAsReadInDb(user.id);
 
     if (error) {
       console.error("Error marking all notifications as read:", error);
@@ -382,11 +500,19 @@ export const NotificationBadge: React.FC = () => {
     }
 
     setNotifications((prevNotifications) =>
-      prevNotifications.map((notification) => ({ ...notification, read: true }))
+      prevNotifications.map((notification) => ({
+        ...notification,
+        read: true,
+        is_read: true,
+      }))
     );
 
     setEnhancedNotifications((prevNotifications) =>
-      prevNotifications.map((notification) => ({ ...notification, read: true }))
+      prevNotifications.map((notification) => ({
+        ...notification,
+        read: true,
+        is_read: true,
+      }))
     );
 
     setUnreadCount(0);
@@ -500,7 +626,13 @@ export const NotificationBadge: React.FC = () => {
     <div className="relative">
       <button
         className="relative p-2 rounded-full hover:bg-violet-100 transition-colors"
-        onClick={() => setShowDropdown(!showDropdown)}
+        onClick={() => {
+          const willOpen = !showDropdown;
+          setShowDropdown(willOpen);
+          if (willOpen) {
+            refreshNotifications();
+          }
+        }}
       >
         <FaBell className="text-violet-800 text-xl" />
         {unreadCount > 0 && (
@@ -586,8 +718,8 @@ export const NotificationBadge: React.FC = () => {
                   key={notification.id}
                   className={`p-3 border-b border-gray-100 ${
                     selectMode ? "cursor-pointer" : ""
-                  } hover:bg-violet-50 transition-colors ${
-                    !notification.read ? "bg-violet-50" : ""
+                   } hover:bg-violet-50 transition-colors ${
+                    !isNotificationRead(notification) ? "bg-violet-50" : ""
                   } ${
                     selectedNotifications.includes(notification.id)
                       ? "bg-violet-100"

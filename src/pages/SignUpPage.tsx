@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate, Link, useLocation } from "react-router-dom";
 import { FaPaw, FaLock, FaEnvelope, FaUser, FaEye, FaEyeSlash } from "react-icons/fa";
 import { useAuth } from "../context/AuthContext";
-import { TermsOfServiceModal } from "../components/TermsOfServiceModal";
 
 interface AdoptionValidation {
   hasExperience: string;
@@ -26,8 +25,6 @@ const SignUpPage = () => {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
-  const [acceptedTerms, setAcceptedTerms] = useState(false);
-  const [showTermsModal, setShowTermsModal] = useState(false);
   const [adoptionAnswers, setAdoptionAnswers] = useState<AdoptionValidation>({
     hasExperience: "",
     stableLiving: "",
@@ -132,10 +129,6 @@ const SignUpPage = () => {
       );
       return false;
     }
-    if (!acceptedTerms) {
-      setError("You must accept the Terms of Service to continue");
-      return false;
-    }
     return true;
   };
 
@@ -175,12 +168,6 @@ const SignUpPage = () => {
       return;
     }
 
-    // Final check: ensure terms are still accepted
-    if (!acceptedTerms) {
-      setError("You must accept the Terms of Service to create an account");
-      return;
-    }
-
     setLoading(true);
     setError("");
 
@@ -211,7 +198,18 @@ const SignUpPage = () => {
           navigate("/login");
         }, 3000);
       } else {
-        setError(error || "Sign up failed. Try again.");
+        // Show the full error message and object for debugging
+        let displayError = "Sign up failed. Try again.";
+        if (error) {
+          if (typeof error === 'string') displayError = error;
+          else if ((error as any)?.message) displayError = (error as any).message;
+          else displayError = JSON.stringify(error);
+        }
+        setError(displayError);
+        if (error) {
+          // Log the full error object for developer visibility
+          console.error("Signup failed with error (full object):", error);
+        }
       }
     } catch (error: unknown) {
       if (error instanceof Error) {
@@ -388,6 +386,7 @@ const SignUpPage = () => {
                      </div>
                    </div>
                  </div>
+<<<<<<< Updated upstream
 
                  <div className="flex items-start">
                    <input
@@ -420,6 +419,8 @@ const SignUpPage = () => {
                      {error}
                    </div>
                  )}
+=======
+>>>>>>> Stashed changes
               </div>
             )}
 
@@ -519,12 +520,6 @@ const SignUpPage = () => {
           </form>
         </div>
       </div>
-
-      {/* Terms of Service Modal */}
-      <TermsOfServiceModal
-        isOpen={showTermsModal}
-        onClose={() => setShowTermsModal(false)}
-      />
     </div>
   );
 };
