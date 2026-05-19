@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate, Link, useLocation } from "react-router-dom";
 import { FaPaw, FaLock, FaEnvelope, FaUser, FaEye, FaEyeSlash } from "react-icons/fa";
 import { useAuth } from "../context/AuthContext";
+import { TermsOfServiceModal } from "../components/TermsOfServiceModal";
 
 interface AdoptionValidation {
   hasExperience: string;
@@ -25,6 +26,8 @@ const SignUpPage = () => {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  const [acceptedTerms, setAcceptedTerms] = useState(false);
+  const [showTermsModal, setShowTermsModal] = useState(false);
   const [adoptionAnswers, setAdoptionAnswers] = useState<AdoptionValidation>({
     hasExperience: "",
     stableLiving: "",
@@ -127,6 +130,10 @@ const SignUpPage = () => {
       setError(
         "Password must be at least 8 characters and include lowercase, uppercase, number, and special character."
       );
+      return false;
+    }
+    if (!acceptedTerms) {
+      setError("You must agree to the Terms of Service to continue.");
       return false;
     }
     return true;
@@ -386,11 +393,9 @@ const SignUpPage = () => {
                      </div>
                    </div>
                  </div>
-<<<<<<< Updated upstream
-
-                 <div className="flex items-start">
-                   <input
-                     type="checkbox"
+                  <div className="flex items-start">
+                    <input
+                      type="checkbox"
                      id="termsCheckbox"
                      checked={acceptedTerms}
                      onChange={(e) => {
@@ -414,15 +419,13 @@ const SignUpPage = () => {
                    </label>
                  </div>
 
-                 {error && (
-                   <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
-                     {error}
-                   </div>
-                 )}
-=======
->>>>>>> Stashed changes
-              </div>
-            )}
+                  {error && (
+                    <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                      {error}
+                    </div>
+                  )}
+               </div>
+             )}
 
             {[2, 3, 4].includes(step) && (
               <div className="bg-white border border-gray-200 rounded-2xl p-4 sm:p-6 space-y-4">
@@ -520,6 +523,10 @@ const SignUpPage = () => {
           </form>
         </div>
       </div>
+      <TermsOfServiceModal
+        isOpen={showTermsModal}
+        onClose={() => setShowTermsModal(false)}
+      />
     </div>
   );
 };

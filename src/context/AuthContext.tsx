@@ -5,12 +5,9 @@ import { supabase } from "../supabase-client";
 interface AuthResponse {
   success: boolean;
   error?: string;
-<<<<<<< Updated upstream
   declinedReason?: string | null;
   /** When present, pass to decline-user-cleanup so auth deletion does not rely on email scan alone. */
   declinedUserId?: string | null;
-=======
->>>>>>> Stashed changes
 }
 
 interface AdoptionValidation {
@@ -239,13 +236,8 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       const userData = {
         id: user.id,
         email: user.email || "",
-<<<<<<< Updated upstream
         full_name: resolvedFullName,
-        role: finalRole,
-=======
-        full_name: user.user_metadata?.full_name || user.email?.split("@")[0] || "Unknown",
         role: user.user_metadata?.role || "user",
->>>>>>> Stashed changes
         adoption_validation: finalAdoptionValidation,
         created_at: new Date().toISOString(),
       };
@@ -358,7 +350,6 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     adoptionValidation?: AdoptionValidation
   ): Promise<AuthResponse> => {
     try {
-<<<<<<< Updated upstream
       const cleanedEmail = email.toLowerCase().trim();
 
       const withTimeout = async <T,>(
@@ -396,9 +387,6 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       if (cleanupError) {
         console.warn("Failed to clean declined user prior to signup:", cleanupError.message);
       }
-
-=======
->>>>>>> Stashed changes
       const fullName = first_name && last_name 
         ? `${first_name} ${last_name}` 
         : email.split("@")[0];
@@ -505,76 +493,8 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         return { success: false, error: typeof authError === 'string' ? authError : JSON.stringify(authError) };
       }
 
-<<<<<<< Updated upstream
       // Do not block signup with an extra users-table insert here.
       // The verification callback page and session hooks already upsert the profile.
-=======
-      // If user was created, try to insert into users table immediately
-      // This might fail due to RLS, but we'll retry after email verification
-      if (signUpData?.user?.id) {
-        console.log("Attempting to insert user into users table:", signUpData.user.id);
-        
-        // Prepare adoption validation - filter out empty values
-        let finalAdoptionValidation = null;
-        if (adoptionValidation && typeof adoptionValidation === 'object') {
-          finalAdoptionValidation = Object.fromEntries(
-            Object.entries(adoptionValidation).filter(([_, value]) => value && value.trim && value.trim() !== '')
-          );
-          if (Object.keys(finalAdoptionValidation).length === 0) {
-            finalAdoptionValidation = null;
-          }
-        }
-        
-        console.log("Adoption validation being saved:", finalAdoptionValidation);
-        
-        const { error: insertError, data: insertData } = await supabase
-          .from("users")
-          .insert([
-            {
-              id: signUpData.user.id,
-              email: email.toLowerCase().trim(),
-              full_name: fullName,
-              role,
-              adoption_validation: finalAdoptionValidation,
-              created_at: new Date().toISOString()
-            }
-          ])
-          .select();
-        
-          if (insertError) {
-          console.error("Failed to insert user profile on sign up (this is OK, will retry after verification):", insertError);
-          console.error("Insert error details:", JSON.stringify(insertError, null, 2));
-          // Keep adoption validation in localStorage for retry after email verification
-          // Try RPC immediately so server creates the user/profile using auth.uid()
-          try {
-            // Call RPC regardless of whether adoption answers exist so a profiles row is created.
-            await supabase.rpc('create_user_profile_if_missing', {
-              _validation: finalAdoptionValidation,
-              _full_name: fullName,
-              _role: role,
-            });
-            // Persist adoption validation into rows if available (no-op if null)
-            try {
-              await supabase.rpc('save_adoption_validation_for_current_user', { _validation: finalAdoptionValidation });
-            } catch (saveErr) {
-              console.warn('save_adoption_validation_for_current_user failed after signup insert error:', saveErr);
-            }
-            // If RPC succeeded, clear localStorage
-            localStorage.removeItem('pendingAdoptionValidation');
-          } catch (rpcErr: any) {
-            console.warn('RPC create_user_profile_if_missing failed after signup insert error:', rpcErr);
-            // Return a clear error so the UI can show meaningful feedback.
-            return { success: false, error: rpcErr?.message || 'Database error saving new user' };
-          }
-          } else {
-          console.log("Successfully inserted user profile:", insertData);
-          // Clear localStorage since we successfully saved it
-          if (finalAdoptionValidation) {
-            localStorage.removeItem("pendingAdoptionValidation");
-          }
-        }
-      }
->>>>>>> Stashed changes
 
       // If user was created but no session (email confirmation required)
       if (signUpData.user && !signUpData.session) {
@@ -630,7 +550,6 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   ): Promise<AuthResponse> => {
     try {
       console.log("Attempting to sign in...");
-<<<<<<< Updated upstream
       const cleanedEmail = email.toLowerCase().trim();
       
       // FIRST: Check decline log (covers cases where the account was deleted after being declined)
@@ -690,8 +609,6 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       }
 
       // Now attempt password authentication
-=======
->>>>>>> Stashed changes
       const { data, error } = await supabase.auth.signInWithPassword({
         email: email.toLowerCase(),
         password,
@@ -724,7 +641,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       // Get user role and verification from users table
       const { data: userData, error: userError } = await supabase
         .from("users")
-        .select("role, verified")
+        .select("role, verified, declined, declined_reason")
         .eq("user_id", data.user.id)
         .single();
 
@@ -737,7 +654,6 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         };
       }
 
-<<<<<<< Updated upstream
       // Double-check declined status (in case it was set after the initial check)
       if (userData.declined === true) {
         await invokeDeclinedCleanup(cleanedEmail, [data.user.id], {
@@ -753,9 +669,6 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
           declinedUserId: data.user.id,
         };
       }
-
-=======
->>>>>>> Stashed changes
       // For regular users: Block login if account is not verified by admin/vet
       // Vets and admins can always log in (they don't need approval)
       if (userData.role === "user") {
@@ -787,17 +700,12 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
           {
             id: data.user.id,
             email: data.user.email,
-<<<<<<< Updated upstream
             role: userData?.role || "user", // userData comes from database query, so it's already the correct role
             full_name: data.user.user_metadata?.full_name ||
               (data.user.user_metadata?.first_name
                 ? `${data.user.user_metadata.first_name}${data.user.user_metadata?.last_name ? ' ' + data.user.user_metadata.last_name : ''}`
                 : null) ||
               data.user.email?.split("@")[0] || null,
-=======
-            role: userData?.role || "user",
-            full_name: data.user.user_metadata?.full_name || data.user.email?.split("@")[0] || "Unknown",
->>>>>>> Stashed changes
             adoption_validation: adoptionValidation,
             created_at: new Date().toISOString(),
           }

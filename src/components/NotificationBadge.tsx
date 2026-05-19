@@ -13,6 +13,7 @@ import {
 import { useNavigate } from "react-router-dom";
 import { toast } from "react-hot-toast";
 import { AdoptionRequestDetails } from "./AdoptionRequestDetails";
+import { insertNotificationWithFallback } from "../utils/notifications";
 
 interface Notification {
   id: number;
@@ -36,6 +37,13 @@ interface EnhancedNotification extends Notification {
   petBreed?: string;
   petAge?: number;
   requesterName?: string;
+}
+
+interface PendingAdoptionRequest {
+  post_id: number;
+  requester_id: string;
+  created_at?: string;
+  pet_name?: string;
 }
 
 const isNotificationRead = (notification: Notification) =>
@@ -72,6 +80,86 @@ export const NotificationBadge: React.FC = () => {
   );
   const [selectMode, setSelectMode] = useState(false);
   const navigate = useNavigate();
+
+  const fetchPendingAdoptionRequests = async (ownerId: string) => {
+    const withPetName = await supabase
+      .from("adoption_requests")
+      .select("post_id, requester_id, created_at, pet_name")
+      .eq("owner_id", ownerId)
+      .eq("status", "pending");
+
+    if (!isMissingColumnError(withPetName.error, "pet_name")) {
+      if (withPetName.error) {
+        console.error(
+          "Error fetching pending adoption requests for notifications:",
+          withPetName.error
+        );
+        return [];
+      }
+
+      return (withPetName.data || []) as PendingAdoptionRequest[];
+    }
+
+    const withoutPetName = await supabase
+      .from("adoption_requests")
+      .select("post_id, requester_id, created_at")
+      .eq("owner_id", ownerId)
+      .eq("status", "pending");
+
+    if (withoutPetName.error) {
+      console.error(
+        "Error fetching pending adoption requests for notifications:",
+        withoutPetName.error
+      );
+      return [];
+    }
+
+    return (withoutPetName.data || []) as PendingAdoptionRequest[];
+  };
+
+  const ensurePendingRequestNotifications = async (
+    ownerId: string,
+    currentNotifications: Notification[]
+  ) => {
+    const pendingRequests = await fetchPendingAdoptionRequests(ownerId);
+    if (!pendingRequests.length) return false;
+
+    const existingKeys = new Set(
+      currentNotifications
+        .filter((notification) => notification.type === "adoption_request")
+        .map((notification) => `${notification.post_id}:${notification.requester_id}`)
+    );
+
+    let insertedAny = false;
+
+    for (const request of pendingRequests) {
+      const dedupeKey = `${request.post_id}:${request.requester_id}`;
+      if (existingKeys.has(dedupeKey)) continue;
+
+      const notificationError = await insertNotificationWithFallback({
+        user_id: ownerId,
+        type: "adoption_request",
+        message: `New adoption request for ${request.pet_name || "your pet"}`,
+        created_at: request.created_at || new Date().toISOString(),
+        requester_id: request.requester_id,
+        link: `/post/${request.post_id}`,
+        post_id: request.post_id,
+      });
+
+      if (notificationError) {
+        console.error(
+          "Error backfilling pending adoption notification:",
+          notificationError
+        );
+        continue;
+      }
+
+      insertedAny = true;
+      existingKeys.add(dedupeKey);
+    }
+
+    return insertedAny;
+  };
 
   const markNotificationAsReadInDb = async (notificationId: number) => {
     const primaryUpdate = await supabase
@@ -135,14 +223,37 @@ export const NotificationBadge: React.FC = () => {
         }
 
         if (data) {
-          setNotifications(data);
+          let workingNotifications = data;
+          const insertedPendingNotifications = await ensurePendingRequestNotifications(
+            user.id,
+            data
+          );
+
+          if (insertedPendingNotifications) {
+            const { data: refetchedData, error: refetchError } = await supabase
+              .from("notifications")
+              .select("*")
+              .eq("user_id", user.id)
+              .order("created_at", { ascending: false });
+
+            if (!refetchError && refetchedData) {
+              workingNotifications = refetchedData;
+            } else if (refetchError) {
+              console.error(
+                "Error refetching notifications after backfill:",
+                refetchError
+              );
+            }
+          }
+
+          setNotifications(workingNotifications);
           // Count unread ones
-          const unread = data.filter((n) => !isNotificationRead(n)).length;
+          const unread = workingNotifications.filter((n) => !isNotificationRead(n)).length;
           setUnreadCount(unread);
 
           // Enhance notifications with additional data
           const enhanced = await Promise.all(
-            data.map(async (notification) => {
+            workingNotifications.map(async (notification) => {
               const enhancedNotification: EnhancedNotification = {
                 ...notification,
               };
@@ -215,6 +326,11 @@ export const NotificationBadge: React.FC = () => {
 
     fetchNotifications();
 
+    // Fallback polling so notifications still update when realtime isn't available.
+    const pollingId = window.setInterval(() => {
+      fetchNotifications();
+    }, 15000);
+
     // Set up real-time subscription for new notifications
     const subscription = supabase
       .channel(
@@ -237,6 +353,7 @@ export const NotificationBadge: React.FC = () => {
       .subscribe();
 
     return () => {
+      window.clearInterval(pollingId);
       supabase.removeChannel(subscription);
     };
   }, [user]);
@@ -258,13 +375,36 @@ export const NotificationBadge: React.FC = () => {
       }
 
       if (data) {
-        setNotifications(data);
+        let workingNotifications = data;
+        const insertedPendingNotifications = await ensurePendingRequestNotifications(
+          user.id,
+          data
+        );
+
+        if (insertedPendingNotifications) {
+          const { data: refetchedData, error: refetchError } = await supabase
+            .from("notifications")
+            .select("*")
+            .eq("user_id", user.id)
+            .order("created_at", { ascending: false });
+
+          if (!refetchError && refetchedData) {
+            workingNotifications = refetchedData;
+          } else if (refetchError) {
+            console.error(
+              "Error refetching notifications after backfill:",
+              refetchError
+            );
+          }
+        }
+
+        setNotifications(workingNotifications);
         // Count unread ones
-        const unread = data.filter((n) => !isNotificationRead(n)).length;
+        const unread = workingNotifications.filter((n) => !isNotificationRead(n)).length;
         setUnreadCount(unread);
 
         const enhanced = await Promise.all(
-          data.map(async (notification) => {
+          workingNotifications.map(async (notification) => {
             const enhancedNotification: EnhancedNotification = {
               ...notification,
             };
