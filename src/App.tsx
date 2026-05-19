@@ -97,33 +97,55 @@ function App() {
       // Allow email verification callback page to process token before enforcing gates.
       if (location.pathname === "/verify-email") return;
 
+      const fallbackRole =
+        user.user_metadata?.role ||
+        user.app_metadata?.role ||
+        localStorage.getItem("userRole") ||
+        null;
+
+      const resolveEffectiveRole = (dbRole?: string | null, fallback?: string | null) => {
+        const normalizedDb = typeof dbRole === "string" ? dbRole.trim() : "";
+        const normalizedFallback = typeof fallback === "string" ? fallback.trim() : "";
+        if (normalizedFallback === "admin" || normalizedFallback === "vet") {
+          return normalizedFallback;
+        }
+        return normalizedDb || normalizedFallback || null;
+      };
+
+      const safeSignOut = async (context: string) => {
+        try {
+          await Promise.race([
+            supabase.auth.signOut(),
+            new Promise<never>((_, reject) =>
+              window.setTimeout(() => reject(new Error("Sign out timed out")), 7000)
+            ),
+          ]);
+        } catch (signOutError) {
+          console.warn(`${context} sign out failed:`, signOutError);
+        } finally {
+          localStorage.removeItem("userRole");
+        }
+      };
+
       const { data: userRow, error } = await supabase
         .from("users")
         .select("role, verified")
         .eq("user_id", user.id)
         .maybeSingle();
 
-      // If we cannot find the profile row for a regular user, treat them as pending.
-      if (error || !userRow) {
-        const metaRole = user.user_metadata?.role || "user";
-        if (metaRole === "user") {
-          await supabase.auth.signOut();
-          localStorage.removeItem("userRole");
-          navigate("/verify-email", {
-            state: {
-              pendingApproval: true,
-              message:
-                "Thank you for registering to PawPal, please wait for the veterinarian to approve your account.",
-            },
-            replace: true,
-          });
-        }
+      if (error) {
+        console.warn("Pending approval gate skipped due to profile lookup error:", error.message || error);
         return;
       }
 
-      if (userRow.role === "user" && userRow.verified !== true) {
-        await supabase.auth.signOut();
-        localStorage.removeItem("userRole");
+      if (!userRow) {
+        console.warn("Pending approval gate skipped: user profile missing.");
+        return;
+      }
+
+      const resolvedRole = resolveEffectiveRole(userRow.role, fallbackRole);
+      if (resolvedRole === "user" && userRow.verified !== true) {
+        await safeSignOut("Pending approval gate");
         navigate("/verify-email", {
           state: {
             pendingApproval: true,

@@ -39,6 +39,12 @@ interface User {
   declined_reason?: string | null;
 }
 
+const normalizeRole = (value: unknown): string | null => {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+};
+
 const VetSidebar = ({ 
   activeSection, 
   isOpen, 
@@ -182,6 +188,11 @@ const VetNavbar = ({ onMenuClick }: { onMenuClick: () => void }) => {
 
 export default function VetDashboard() {
   const { user, role } = useAuth();
+  const effectiveRole =
+    normalizeRole(role) ||
+    normalizeRole(user?.user_metadata?.role) ||
+    normalizeRole(user?.app_metadata?.role) ||
+    normalizeRole(localStorage.getItem("userRole"));
   const [pendingPosts, setPendingPosts] = useState<Post[]>([]);
   const [history, setHistory] = useState<Post[]>([]);
   const [pendingUsers, setPendingUsers] = useState<User[]>([]);
@@ -201,12 +212,12 @@ export default function VetDashboard() {
   const recentlyProcessedUsersRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
-    if (role !== "vet") return;
+    if (effectiveRole !== "vet") return;
     fetchPendingUsers();
     fetchPendingPosts();
     fetchHistory();
     // eslint-disable-next-line
-  }, [user, role]);
+  }, [user, effectiveRole]);
 
   // Scroll section highlight logic
   useEffect(() => {
@@ -686,7 +697,12 @@ export default function VetDashboard() {
     );
   };
 
-  if (role !== "vet")
+  if (user && !effectiveRole)
+    return (
+      <div className="p-8 text-center text-gray-500">Loading your account...</div>
+    );
+
+  if (effectiveRole !== "vet")
     return <div className="p-8 text-center text-red-500">Access denied.</div>;
 
   return (
