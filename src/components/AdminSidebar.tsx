@@ -1,5 +1,5 @@
 import { NavLink } from "react-router-dom";
-import { FaHome, FaUsers, FaUserMd, FaNewspaper, FaPaw, FaTimes } from "react-icons/fa";
+import { FaHome, FaUsers, FaUserMd, FaNewspaper, FaPaw, FaFileAlt, FaTimes } from "react-icons/fa";
 
 interface AdminSidebarProps {
   userRole: string;
@@ -84,6 +84,22 @@ const AdminSidebar = ({ userRole, isOpen, onClose }: AdminSidebarProps) => {
               >
                 <FaUserMd className="mr-3" />
                 Vet Management
+              </NavLink>
+              <NavLink
+                to="/admin-dashboard/reports"
+                onClick={() => {
+                  if (window.innerWidth < 768) {
+                    onClose();
+                  }
+                }}
+                className={({ isActive }) =>
+                  `flex items-center px-6 py-3 text-gray-700 hover:bg-violet-50 hover:text-violet-600 ${
+                    isActive ? "bg-violet-50 text-violet-600" : ""
+                  }`
+                }
+              >
+                <FaFileAlt className="mr-3" />
+                Reports
               </NavLink>
             </>
           )}

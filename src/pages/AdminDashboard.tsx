@@ -4,6 +4,7 @@ import { toast } from "react-hot-toast";
 import AdminSidebar from "../components/AdminSidebar";
 import CreateVetAccount from "../components/CreateVetAccount";
 import AdoptionManagement from "./AdoptionManagement";
+import AdminReportGeneration from "./AdminReportGeneration";
 import { Routes, Route, useNavigate } from "react-router-dom";
 import { FaTimes, FaBars } from "react-icons/fa";
 import { useAuth } from "../context/AuthContext";
@@ -1362,6 +1363,7 @@ const AdminDashboard = () => {
               <>
                 <Route path="/users" element={<UserManagement />} />
                 <Route path="/vets" element={<VetManagement />} />
+                <Route path="/reports" element={<AdminReportGeneration />} />
               </>
             )}
             <Route path="/posts" element={<PostManagement />} />
